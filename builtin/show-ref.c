@@ -6,7 +6,6 @@
 #include "object-name.h"
 #include "object-store-ll.h"
 #include "object.h"
-#include "tag.h"
 #include "string-list.h"
 #include "parse-options.h"
 
@@ -315,9 +314,9 @@ int cmd_show_ref(int argc, const char **argv, const char *prefix)
 	argc = parse_options(argc, argv, prefix, show_ref_options,
 			     show_ref_usage, 0);
 
-	if ((!!exclude_existing_opts.enabled + !!verify + !!exists) > 1)
-		die(_("only one of '%s', '%s' or '%s' can be given"),
-		    "--exclude-existing", "--verify", "--exists");
+	die_for_incompatible_opt3(exclude_existing_opts.enabled, "--exclude-existing",
+				  verify, "--verify",
+				  exists, "--exists");
 
 	if (exclude_existing_opts.enabled)
 		return cmd_show_ref__exclude_existing(&exclude_existing_opts);
