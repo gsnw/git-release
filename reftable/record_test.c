@@ -16,11 +16,11 @@
 
 static void test_copy(struct reftable_record *rec)
 {
-	struct reftable_record copy = { 0 };
+	struct reftable_record copy;
 	uint8_t typ;
 
 	typ = reftable_record_type(rec);
-	copy = reftable_new_record(typ);
+	reftable_record_init(&copy, typ);
 	reftable_record_copy_from(&copy, rec, GIT_SHA1_RAWSZ);
 	/* do it twice to catch memory leaks */
 	reftable_record_copy_from(&copy, rec, GIT_SHA1_RAWSZ);
@@ -119,15 +119,10 @@ static void test_reftable_ref_record_roundtrip(void)
 		case REFTABLE_REF_DELETION:
 			break;
 		case REFTABLE_REF_VAL1:
-			in.u.ref.value.val1 = reftable_malloc(GIT_SHA1_RAWSZ);
 			set_hash(in.u.ref.value.val1, 1);
 			break;
 		case REFTABLE_REF_VAL2:
-			in.u.ref.value.val2.value =
-				reftable_malloc(GIT_SHA1_RAWSZ);
 			set_hash(in.u.ref.value.val2.value, 1);
-			in.u.ref.value.val2.target_value =
-				reftable_malloc(GIT_SHA1_RAWSZ);
 			set_hash(in.u.ref.value.val2.target_value, 2);
 			break;
 		case REFTABLE_REF_SYMREF:
@@ -236,8 +231,8 @@ static void test_reftable_log_record_roundtrip(void)
 				.value_type = REFTABLE_LOG_UPDATE,
 				.value = {
 					.update = {
-						.new_hash = reftable_calloc(GIT_SHA1_RAWSZ),
-						.old_hash = reftable_calloc(GIT_SHA1_RAWSZ),
+						.new_hash = reftable_calloc(GIT_SHA1_RAWSZ, 1),
+						.old_hash = reftable_calloc(GIT_SHA1_RAWSZ, 1),
 						.name = xstrdup("old name"),
 						.email = xstrdup("old@email"),
 						.message = xstrdup("old message"),

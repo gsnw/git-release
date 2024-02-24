@@ -76,7 +76,7 @@ int reftable_is_block_type(uint8_t typ)
 	return 0;
 }
 
-uint8_t *reftable_ref_record_val1(const struct reftable_ref_record *rec)
+const unsigned char *reftable_ref_record_val1(const struct reftable_ref_record *rec)
 {
 	switch (rec->value_type) {
 	case REFTABLE_REF_VAL1:
@@ -88,7 +88,7 @@ uint8_t *reftable_ref_record_val1(const struct reftable_ref_record *rec)
 	}
 }
 
-uint8_t *reftable_ref_record_val2(const struct reftable_ref_record *rec)
+const unsigned char *reftable_ref_record_val2(const struct reftable_ref_record *rec)
 {
 	switch (rec->value_type) {
 	case REFTABLE_REF_VAL2:
@@ -219,13 +219,10 @@ static void reftable_ref_record_copy_from(void *rec, const void *src_rec,
 	case REFTABLE_REF_DELETION:
 		break;
 	case REFTABLE_REF_VAL1:
-		ref->value.val1 = reftable_malloc(hash_size);
 		memcpy(ref->value.val1, src->value.val1, hash_size);
 		break;
 	case REFTABLE_REF_VAL2:
-		ref->value.val2.value = reftable_malloc(hash_size);
 		memcpy(ref->value.val2.value, src->value.val2.value, hash_size);
-		ref->value.val2.target_value = reftable_malloc(hash_size);
 		memcpy(ref->value.val2.target_value,
 		       src->value.val2.target_value, hash_size);
 		break;
@@ -242,7 +239,7 @@ static char hexdigit(int c)
 	return 'a' + (c - 10);
 }
 
-static void hex_format(char *dest, uint8_t *src, int hash_size)
+static void hex_format(char *dest, const unsigned char *src, int hash_size)
 {
 	assert(hash_size > 0);
 	if (src) {
@@ -299,11 +296,8 @@ void reftable_ref_record_release(struct reftable_ref_record *ref)
 		reftable_free(ref->value.symref);
 		break;
 	case REFTABLE_REF_VAL2:
-		reftable_free(ref->value.val2.target_value);
-		reftable_free(ref->value.val2.value);
 		break;
 	case REFTABLE_REF_VAL1:
-		reftable_free(ref->value.val1);
 		break;
 	case REFTABLE_REF_DELETION:
 		break;
@@ -394,7 +388,6 @@ static int reftable_ref_record_decode(void *rec, struct strbuf key,
 			return -1;
 		}
 
-		r->value.val1 = reftable_malloc(hash_size);
 		memcpy(r->value.val1, in.buf, hash_size);
 		string_view_consume(&in, hash_size);
 		break;
@@ -404,11 +397,9 @@ static int reftable_ref_record_decode(void *rec, struct strbuf key,
 			return -1;
 		}
 
-		r->value.val2.value = reftable_malloc(hash_size);
 		memcpy(r->value.val2.value, in.buf, hash_size);
 		string_view_consume(&in, hash_size);
 
-		r->value.val2.target_value = reftable_malloc(hash_size);
 		memcpy(r->value.val2.target_value, in.buf, hash_size);
 		string_view_consume(&in, hash_size);
 		break;
@@ -506,12 +497,13 @@ static void reftable_obj_record_copy_from(void *rec, const void *src_rec,
 		(const struct reftable_obj_record *)src_rec;
 
 	reftable_obj_record_release(obj);
-	obj->hash_prefix = reftable_malloc(src->hash_prefix_len);
+
+	REFTABLE_ALLOC_ARRAY(obj->hash_prefix, src->hash_prefix_len);
 	obj->hash_prefix_len = src->hash_prefix_len;
 	if (src->hash_prefix_len)
 		memcpy(obj->hash_prefix, src->hash_prefix, obj->hash_prefix_len);
 
-	obj->offsets = reftable_malloc(src->offset_len * sizeof(uint64_t));
+	REFTABLE_ALLOC_ARRAY(obj->offsets, src->offset_len);
 	obj->offset_len = src->offset_len;
 	COPY_ARRAY(obj->offsets, src->offsets, src->offset_len);
 }
@@ -568,7 +560,8 @@ static int reftable_obj_record_decode(void *rec, struct strbuf key,
 	int n = 0;
 	uint64_t last;
 	int j;
-	r->hash_prefix = reftable_malloc(key.len);
+
+	REFTABLE_ALLOC_ARRAY(r->hash_prefix, key.len);
 	memcpy(r->hash_prefix, key.buf, key.len);
 	r->hash_prefix_len = key.len;
 
@@ -586,7 +579,7 @@ static int reftable_obj_record_decode(void *rec, struct strbuf key,
 	if (count == 0)
 		return start.len - in.len;
 
-	r->offsets = reftable_malloc(count * sizeof(uint64_t));
+	REFTABLE_ALLOC_ARRAY(r->offsets, count);
 	r->offset_len = count;
 
 	n = get_var_int(&r->offsets[0], &in);
@@ -724,12 +717,12 @@ static void reftable_log_record_copy_from(void *rec, const void *src_rec,
 		}
 
 		if (dst->value.update.new_hash) {
-			dst->value.update.new_hash = reftable_malloc(hash_size);
+			REFTABLE_ALLOC_ARRAY(dst->value.update.new_hash, hash_size);
 			memcpy(dst->value.update.new_hash,
 			       src->value.update.new_hash, hash_size);
 		}
 		if (dst->value.update.old_hash) {
-			dst->value.update.old_hash = reftable_malloc(hash_size);
+			REFTABLE_ALLOC_ARRAY(dst->value.update.old_hash, hash_size);
 			memcpy(dst->value.update.old_hash,
 			       src->value.update.old_hash, hash_size);
 		}
@@ -1164,7 +1157,7 @@ int reftable_record_equal(struct reftable_record *a, struct reftable_record *b, 
 		reftable_record_data(a), reftable_record_data(b), hash_size);
 }
 
-static int hash_equal(uint8_t *a, uint8_t *b, int hash_size)
+static int hash_equal(const unsigned char *a, const unsigned char *b, int hash_size)
 {
 	if (a && b)
 		return !memcmp(a, b, hash_size);
@@ -1266,45 +1259,22 @@ reftable_record_vtable(struct reftable_record *rec)
 	abort();
 }
 
-struct reftable_record reftable_new_record(uint8_t typ)
+void reftable_record_init(struct reftable_record *rec, uint8_t typ)
 {
-	struct reftable_record clean = {
-		.type = typ,
-	};
+	memset(rec, 0, sizeof(*rec));
+	rec->type = typ;
 
-	/* the following is involved, but the naive solution (just return
-	 * `clean` as is, except for BLOCK_TYPE_INDEX), returns a garbage
-	 * clean.u.obj.offsets pointer on Windows VS CI.  Go figure.
-	 */
 	switch (typ) {
-	case BLOCK_TYPE_OBJ:
-	{
-		struct reftable_obj_record obj = { 0 };
-		clean.u.obj = obj;
-		break;
-	}
-	case BLOCK_TYPE_INDEX:
-	{
-		struct reftable_index_record idx = {
-			.last_key = STRBUF_INIT,
-		};
-		clean.u.idx = idx;
-		break;
-	}
 	case BLOCK_TYPE_REF:
-	{
-		struct reftable_ref_record ref = { 0 };
-		clean.u.ref = ref;
-		break;
-	}
 	case BLOCK_TYPE_LOG:
-	{
-		struct reftable_log_record log = { 0 };
-		clean.u.log = log;
-		break;
+	case BLOCK_TYPE_OBJ:
+		return;
+	case BLOCK_TYPE_INDEX:
+		strbuf_init(&rec->u.idx.last_key, 0);
+		return;
+	default:
+		BUG("unhandled record type");
 	}
-	}
-	return clean;
 }
 
 void reftable_record_print(struct reftable_record *rec, int hash_size)

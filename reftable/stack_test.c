@@ -443,14 +443,15 @@ static void test_reftable_stack_add(void)
 	int err = 0;
 	struct reftable_write_options cfg = {
 		.exact_log_message = 1,
+		.default_permissions = 0660,
 	};
 	struct reftable_stack *st = NULL;
 	char *dir = get_tmp_dir(__LINE__);
-
 	struct reftable_ref_record refs[2] = { { NULL } };
 	struct reftable_log_record logs[2] = { { NULL } };
+	struct strbuf path = STRBUF_INIT;
+	struct stat stat_result;
 	int N = ARRAY_SIZE(refs);
-
 
 	err = reftable_new_stack(&st, dir, cfg);
 	EXPECT_ERR(err);
@@ -462,7 +463,6 @@ static void test_reftable_stack_add(void)
 		refs[i].refname = xstrdup(buf);
 		refs[i].update_index = i + 1;
 		refs[i].value_type = REFTABLE_REF_VAL1;
-		refs[i].value.val1 = reftable_malloc(GIT_SHA1_RAWSZ);
 		set_test_hash(refs[i].value.val1, i);
 
 		logs[i].refname = xstrdup(buf);
@@ -510,12 +510,32 @@ static void test_reftable_stack_add(void)
 		reftable_log_record_release(&dest);
 	}
 
+#ifndef GIT_WINDOWS_NATIVE
+	strbuf_addstr(&path, dir);
+	strbuf_addstr(&path, "/tables.list");
+	err = stat(path.buf, &stat_result);
+	EXPECT(!err);
+	EXPECT((stat_result.st_mode & 0777) == cfg.default_permissions);
+
+	strbuf_reset(&path);
+	strbuf_addstr(&path, dir);
+	strbuf_addstr(&path, "/");
+	/* do not try at home; not an external API for reftable. */
+	strbuf_addstr(&path, st->readers[0]->name);
+	err = stat(path.buf, &stat_result);
+	EXPECT(!err);
+	EXPECT((stat_result.st_mode & 0777) == cfg.default_permissions);
+#else
+	(void) stat_result;
+#endif
+
 	/* cleanup */
 	reftable_stack_destroy(st);
 	for (i = 0; i < N; i++) {
 		reftable_ref_record_release(&refs[i]);
 		reftable_log_record_release(&logs[i]);
 	}
+	strbuf_release(&path);
 	clear_dir(dir);
 }
 
@@ -599,7 +619,6 @@ static void test_reftable_stack_tombstone(void)
 		refs[i].update_index = i + 1;
 		if (i % 2 == 0) {
 			refs[i].value_type = REFTABLE_REF_VAL1;
-			refs[i].value.val1 = reftable_malloc(GIT_SHA1_RAWSZ);
 			set_test_hash(refs[i].value.val1, i);
 		}
 
@@ -713,7 +732,7 @@ static void test_sizes_to_segments(void)
 	uint64_t sizes[] = { 2, 3, 4, 5, 7, 9 };
 	/* .................0  1  2  3  4  5 */
 
-	int seglen = 0;
+	size_t seglen = 0;
 	struct segment *segs =
 		sizes_to_segments(&seglen, sizes, ARRAY_SIZE(sizes));
 	EXPECT(segs[2].log == 3);
@@ -728,7 +747,7 @@ static void test_sizes_to_segments(void)
 
 static void test_sizes_to_segments_empty(void)
 {
-	int seglen = 0;
+	size_t seglen = 0;
 	struct segment *segs = sizes_to_segments(&seglen, NULL, 0);
 	EXPECT(seglen == 0);
 	reftable_free(segs);
@@ -737,8 +756,7 @@ static void test_sizes_to_segments_empty(void)
 static void test_sizes_to_segments_all_equal(void)
 {
 	uint64_t sizes[] = { 5, 5 };
-
-	int seglen = 0;
+	size_t seglen = 0;
 	struct segment *segs =
 		sizes_to_segments(&seglen, sizes, ARRAY_SIZE(sizes));
 	EXPECT(seglen == 1);
