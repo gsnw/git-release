@@ -16,11 +16,6 @@ https://developers.google.com/open-source/licenses/bsd
 #include "reader.h"
 #include "reftable-error.h"
 
-int iterator_is_null(struct reftable_iterator *it)
-{
-	return !it->ops;
-}
-
 static void filtering_ref_iterator_close(void *iter_arg)
 {
 	struct filtering_ref_iterator *fri = iter_arg;
@@ -120,7 +115,7 @@ static int indexed_table_ref_iter_next_block(struct indexed_table_ref_iter *it)
 		/* indexed block does not exist. */
 		return REFTABLE_FORMAT_ERROR;
 	}
-	block_reader_start(&it->block_reader, &it->cur);
+	block_iter_seek_start(&it->cur, &it->block_reader);
 	return 0;
 }
 

@@ -1526,6 +1526,7 @@ static const char *update(struct command *cmd, struct shallow_info *si)
 	    starts_with(name, "refs/heads/")) {
 		struct object *old_object, *new_object;
 		struct commit *old_commit, *new_commit;
+		int ret2;
 
 		old_object = parse_object(the_repository, old_oid);
 		new_object = parse_object(the_repository, new_oid);
@@ -1539,7 +1540,10 @@ static const char *update(struct command *cmd, struct shallow_info *si)
 		}
 		old_commit = (struct commit *)old_object;
 		new_commit = (struct commit *)new_object;
-		if (!repo_in_merge_bases(the_repository, old_commit, new_commit)) {
+		ret2 = repo_in_merge_bases(the_repository, old_commit, new_commit);
+		if (ret2 < 0)
+			exit(128);
+		if (!ret2) {
 			rp_error("denying non-fast-forward %s"
 				 " (you should pull first)", name);
 			ret = "non-fast-forward";
@@ -2581,17 +2585,16 @@ int cmd_receive_pack(int argc, const char **argv, const char *prefix)
 		if (auto_gc) {
 			struct child_process proc = CHILD_PROCESS_INIT;
 
-			proc.no_stdin = 1;
-			proc.stdout_to_stderr = 1;
-			proc.err = use_sideband ? -1 : 0;
-			proc.git_cmd = proc.close_object_store = 1;
-			strvec_pushl(&proc.args, "gc", "--auto", "--quiet",
-				     NULL);
+			if (prepare_auto_maintenance(1, &proc)) {
+				proc.no_stdin = 1;
+				proc.stdout_to_stderr = 1;
+				proc.err = use_sideband ? -1 : 0;
 
-			if (!start_command(&proc)) {
-				if (use_sideband)
-					copy_to_sideband(proc.err, -1, NULL);
-				finish_command(&proc);
+				if (!start_command(&proc)) {
+					if (use_sideband)
+						copy_to_sideband(proc.err, -1, NULL);
+					finish_command(&proc);
+				}
 			}
 		}
 		if (auto_update_server_info)
