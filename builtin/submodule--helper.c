@@ -1,4 +1,3 @@
-#define USE_THE_INDEX_VARIABLE
 #include "builtin.h"
 #include "abspath.h"
 #include "environment.h"
@@ -207,18 +206,18 @@ static int module_list_compute(const char **argv,
 	if (repo_read_index(the_repository) < 0)
 		die(_("index file corrupt"));
 
-	for (i = 0; i < the_index.cache_nr; i++) {
-		const struct cache_entry *ce = the_index.cache[i];
+	for (i = 0; i < the_repository->index->cache_nr; i++) {
+		const struct cache_entry *ce = the_repository->index->cache[i];
 
-		if (!match_pathspec(&the_index, pathspec, ce->name, ce_namelen(ce),
+		if (!match_pathspec(the_repository->index, pathspec, ce->name, ce_namelen(ce),
 				    0, ps_matched, 1) ||
 		    !S_ISGITLINK(ce->ce_mode))
 			continue;
 
 		ALLOC_GROW(list->entries, list->nr + 1, list->alloc);
 		list->entries[list->nr++] = ce;
-		while (i + 1 < the_index.cache_nr &&
-		       !strcmp(ce->name, the_index.cache[i + 1]->name))
+		while (i + 1 < the_repository->index->cache_nr &&
+		       !strcmp(ce->name, the_repository->index->cache[i + 1]->name))
 			/*
 			 * Skip entries with the same name in different stages
 			 * to make sure an entry is returned only once.
@@ -257,11 +256,9 @@ static void module_list_active(struct module_list *list)
 
 static char *get_up_path(const char *path)
 {
-	int i;
 	struct strbuf sb = STRBUF_INIT;
 
-	for (i = count_slashes(path); i; i--)
-		strbuf_addstr(&sb, "../");
+	strbuf_addstrings(&sb, "../", count_slashes(path));
 
 	/*
 	 * Check if 'path' ends with slash or not
@@ -379,8 +376,7 @@ static void runcommand_in_submodule_cb(const struct cache_entry *list_item,
 
 		strvec_pushl(&cpr.args, "submodule--helper", "foreach", "--recursive",
 			     NULL);
-		strvec_pushl(&cpr.args, "--super-prefix", NULL);
-		strvec_pushf(&cpr.args, "%s/", displaypath);
+		strvec_pushf(&cpr.args, "--super-prefix=%s/", displaypath);
 
 		if (info->quiet)
 			strvec_push(&cpr.args, "--quiet");
@@ -680,7 +676,8 @@ static void status_submodule(const char *path, const struct object_id *ce_oid,
 			     displaypath);
 	} else if (!(flags & OPT_CACHED)) {
 		struct object_id oid;
-		struct ref_store *refs = get_submodule_ref_store(path);
+		struct ref_store *refs = repo_get_submodule_ref_store(the_repository,
+								      path);
 
 		if (!refs) {
 			print_status(flags, '-', path, ce_oid, displaypath);
@@ -704,8 +701,7 @@ static void status_submodule(const char *path, const struct object_id *ce_oid,
 
 		strvec_pushl(&cpr.args, "submodule--helper", "status",
 			     "--recursive", NULL);
-		strvec_push(&cpr.args, "--super-prefix");
-		strvec_pushf(&cpr.args, "%s/", displaypath);
+		strvec_pushf(&cpr.args, "--super-prefix=%s/", displaypath);
 
 		if (flags & OPT_CACHED)
 			strvec_push(&cpr.args, "--cached");
@@ -904,7 +900,8 @@ static void generate_submodule_summary(struct summary_cb *info,
 
 	if (!info->cached && oideq(&p->oid_dst, null_oid())) {
 		if (S_ISGITLINK(p->mod_dst)) {
-			struct ref_store *refs = get_submodule_ref_store(p->sm_path);
+			struct ref_store *refs = repo_get_submodule_ref_store(the_repository,
+									      p->sm_path);
 
 			if (refs)
 				refs_head_ref(refs, handle_submodule_head_ref, &p->oid_dst);
@@ -913,7 +910,7 @@ static void generate_submodule_summary(struct summary_cb *info,
 			int fd = open(p->sm_path, O_RDONLY);
 
 			if (fd < 0 || fstat(fd, &st) < 0 ||
-			    index_fd(&the_index, &p->oid_dst, fd, &st, OBJ_BLOB,
+			    index_fd(the_repository->index, &p->oid_dst, fd, &st, OBJ_BLOB,
 				     p->sm_path, 0))
 				error(_("couldn't hash object from '%s'"), p->sm_path);
 		} else {
@@ -1305,9 +1302,7 @@ static void sync_submodule(const char *path, const char *prefix,
 
 		strvec_pushl(&cpr.args, "submodule--helper", "sync",
 			     "--recursive", NULL);
-		strvec_push(&cpr.args, "--super-prefix");
-		strvec_pushf(&cpr.args, "%s/", displaypath);
-
+		strvec_pushf(&cpr.args, "--super-prefix=%s/", displaypath);
 
 		if (flags & OPT_QUIET)
 			strvec_push(&cpr.args, "--quiet");
@@ -2457,7 +2452,9 @@ static int remote_submodule_branch(const char *path, const char **branch)
 	}
 
 	if (!strcmp(*branch, ".")) {
-		const char *refname = resolve_ref_unsafe("HEAD", 0, NULL, NULL);
+		const char *refname = refs_resolve_ref_unsafe(get_main_ref_store(the_repository),
+							      "HEAD", 0, NULL,
+							      NULL);
 
 		if (!refname)
 			return die_message(_("No such ref: %s"), "HEAD");
@@ -2533,10 +2530,9 @@ static void update_data_to_args(const struct update_data *update_data,
 	enum submodule_update_type update_type = update_data->update_default;
 
 	strvec_pushl(args, "submodule--helper", "update", "--recursive", NULL);
-	if (update_data->displaypath) {
-		strvec_push(args, "--super-prefix");
-		strvec_pushf(args, "%s/", update_data->displaypath);
-	}
+	if (update_data->displaypath)
+		strvec_pushf(args, "--super-prefix=%s/",
+			     update_data->displaypath);
 	strvec_pushf(args, "--jobs=%d", update_data->max_jobs);
 	if (update_data->quiet)
 		strvec_push(args, "--quiet");
@@ -2597,7 +2593,8 @@ static int update_submodule(struct update_data *update_data)
 
 	if (update_data->just_cloned)
 		oidcpy(&update_data->suboid, null_oid());
-	else if (resolve_gitlink_ref(update_data->sm_path, "HEAD", &update_data->suboid))
+	else if (repo_resolve_gitlink_ref(the_repository, update_data->sm_path,
+					  "HEAD", &update_data->suboid))
 		return die_message(_("Unable to find current revision in submodule path '%s'"),
 				   update_data->displaypath);
 
@@ -2624,7 +2621,8 @@ static int update_submodule(struct update_data *update_data)
 						   update_data->sm_path);
 		}
 
-		if (resolve_gitlink_ref(update_data->sm_path, remote_ref, &update_data->oid))
+		if (repo_resolve_gitlink_ref(the_repository, update_data->sm_path,
+					     remote_ref, &update_data->oid))
 			return die_message(_("Unable to find %s revision in submodule path '%s'"),
 					   remote_ref, update_data->sm_path);
 
@@ -2875,7 +2873,8 @@ static int push_check(int argc, const char **argv, const char *prefix UNUSED)
 	argv++;
 	argc--;
 	/* Get the submodule's head ref and determine if it is detached */
-	head = resolve_refdup("HEAD", 0, &head_oid, NULL);
+	head = refs_resolve_refdup(get_main_ref_store(the_repository), "HEAD",
+				   0, &head_oid, NULL);
 	if (!head)
 		die(_("Failed to resolve HEAD as a valid ref."));
 	if (!strcmp(head, "HEAD"))
@@ -3322,21 +3321,21 @@ static void die_on_index_match(const char *path, int force)
 		char *ps_matched = xcalloc(ps.nr, 1);
 
 		/* TODO: audit for interaction with sparse-index. */
-		ensure_full_index(&the_index);
+		ensure_full_index(the_repository->index);
 
 		/*
 		 * Since there is only one pathspec, we just need to
 		 * check ps_matched[0] to know if a cache entry matched.
 		 */
-		for (i = 0; i < the_index.cache_nr; i++) {
-			ce_path_match(&the_index, the_index.cache[i], &ps,
+		for (i = 0; i < the_repository->index->cache_nr; i++) {
+			ce_path_match(the_repository->index, the_repository->index->cache[i], &ps,
 				      ps_matched);
 
 			if (ps_matched[0]) {
 				if (!force)
 					die(_("'%s' already exists in the index"),
 					    path);
-				if (!S_ISGITLINK(the_index.cache[i]->ce_mode))
+				if (!S_ISGITLINK(the_repository->index->cache[i]->ce_mode))
 					die(_("'%s' already exists in the index "
 					      "and is not a submodule"), path);
 				break;
@@ -3353,7 +3352,7 @@ static void die_on_repo_without_commits(const char *path)
 	strbuf_addstr(&sb, path);
 	if (is_nonbare_repository_dir(&sb)) {
 		struct object_id oid;
-		if (resolve_gitlink_ref(path, "HEAD", &oid) < 0)
+		if (repo_resolve_gitlink_ref(the_repository, path, "HEAD", &oid) < 0)
 			die(_("'%s' does not have a commit checked out"), path);
 	}
 	strbuf_release(&sb);

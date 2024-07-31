@@ -1,3 +1,5 @@
+#define USE_THE_REPOSITORY_VARIABLE
+
 #include "git-compat-util.h"
 #include "abspath.h"
 #include "repository.h"
@@ -99,7 +101,8 @@ int is_staging_gitmodules_ok(struct index_state *istate)
 static int for_each_remote_ref_submodule(const char *submodule,
 					 each_ref_fn fn, void *cb_data)
 {
-	return refs_for_each_remote_ref(get_submodule_ref_store(submodule),
+	return refs_for_each_remote_ref(repo_get_submodule_ref_store(the_repository,
+								     submodule),
 					fn, cb_data);
 }
 
@@ -1242,7 +1245,8 @@ int push_unpushed_submodules(struct repository *r,
 		char *head;
 		struct object_id head_oid;
 
-		head = resolve_refdup("HEAD", 0, &head_oid, NULL);
+		head = refs_resolve_refdup(get_main_ref_store(the_repository),
+					   "HEAD", 0, &head_oid, NULL);
 		if (!head)
 			die(_("Failed to resolve HEAD as a valid ref."));
 
@@ -1280,7 +1284,8 @@ static int append_oid_to_array(const char *ref UNUSED,
 void check_for_new_submodule_commits(struct object_id *oid)
 {
 	if (!initialized_fetch_ref_tips) {
-		for_each_ref(append_oid_to_array, &ref_tips_before_fetch);
+		refs_for_each_ref(get_main_ref_store(the_repository),
+				  append_oid_to_array, &ref_tips_before_fetch);
 		initialized_fetch_ref_tips = 1;
 	}
 
@@ -2116,7 +2121,7 @@ static void submodule_reset_index(const char *path, const char *super_prefix)
 	strvec_pushf(&cp.args, "--super-prefix=%s%s/",
 		     (super_prefix ? super_prefix : ""), path);
 
-	strvec_push(&cp.args, empty_tree_oid_hex());
+	strvec_push(&cp.args, empty_tree_oid_hex(the_repository->hash_algo));
 
 	if (run_command(&cp))
 		die(_("could not reset submodule index"));
@@ -2226,9 +2231,9 @@ int submodule_move_head(const char *path, const char *super_prefix,
 		strvec_push(&cp.args, "-m");
 
 	if (!(flags & SUBMODULE_MOVE_HEAD_FORCE))
-		strvec_push(&cp.args, old_head ? old_head : empty_tree_oid_hex());
+		strvec_push(&cp.args, old_head ? old_head : empty_tree_oid_hex(the_repository->hash_algo));
 
-	strvec_push(&cp.args, new_head ? new_head : empty_tree_oid_hex());
+	strvec_push(&cp.args, new_head ? new_head : empty_tree_oid_hex(the_repository->hash_algo));
 
 	if (run_command(&cp)) {
 		ret = error(_("Submodule '%s' could not be updated."), path);
