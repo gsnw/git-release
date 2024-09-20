@@ -185,8 +185,8 @@ For shell scripts specifically (not exhaustive):
 
  - Even though "local" is not part of POSIX, we make heavy use of it
    in our test suite.  We do not use it in scripted Porcelains, and
-   hopefully nobody starts using "local" before they are reimplemented
-   in C ;-)
+   hopefully nobody starts using "local" before all shells that matter
+   support it (notably, ksh from AT&T Research does not support it yet).
 
  - Some versions of shell do not understand "export variable=value",
    so we write "variable=value" and then "export variable" on two
@@ -203,6 +203,33 @@ For shell scripts specifically (not exhaustive):
 	(correct)
 	local variable="$value"
 	local variable="$(command args)"
+
+ - The common construct
+
+	VAR=VAL command args
+
+   to temporarily set and export environment variable VAR only while
+   "command args" is running is handy, but this triggers an
+   unspecified behaviour according to POSIX when used for a command
+   that is not an external command (like shell functions).  Indeed,
+   dash 0.5.10.2-6 on Ubuntu 20.04, /bin/sh on FreeBSD 13, and AT&T
+   ksh all make a temporary assignment without exporting the variable,
+   in such a case.  As it does not work portably across shells, do not
+   use this syntax for shell functions.  A common workaround is to do
+   an explicit export in a subshell, like so:
+
+	(incorrect)
+	VAR=VAL func args
+
+	(correct)
+	(
+		VAR=VAL &&
+		export VAR &&
+		func args
+	)
+
+   but be careful that the effect "func" makes to the variables in the
+   current shell will be lost across the subshell boundary.
 
  - Use octal escape sequences (e.g. "\302\242"), not hexadecimal (e.g.
    "\xc2\xa2") in printf format strings, since hexadecimal escape
@@ -266,7 +293,9 @@ For C programs:
      v12.01, 2022-03-28).
 
  - Variables have to be declared at the beginning of the block, before
-   the first statement (i.e. -Wdeclaration-after-statement).
+   the first statement (i.e. -Wdeclaration-after-statement).  It is
+   encouraged to have a blank line between the end of the declarations
+   and the first statement in the block.
 
  - NULL pointers shall be written as NULL, not as 0.
 
@@ -285,6 +314,13 @@ For C programs:
 
         while( condition )
 		func (bar+1);
+
+ - A binary operator (other than ",") and ternary conditional "?:"
+   have a space on each side of the operator to separate it from its
+   operands.  E.g. "A + 1", not "A+1".
+
+ - A unary operator (other than "." and "->") have no space between it
+   and its operand.  E.g. "(char *)ptr", not "(char *) ptr".
 
  - Do not explicitly compare an integral value with constant 0 or '\0',
    or a pointer value with constant NULL.  For instance, to validate that
