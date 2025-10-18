@@ -883,7 +883,9 @@ BUILT_INS += git-stage$X
 BUILT_INS += git-status$X
 BUILT_INS += git-switch$X
 BUILT_INS += git-version$X
+ifndef WITH_BREAKING_CHANGES
 BUILT_INS += git-whatchanged$X
+endif
 
 # what 'all' will build but not install in gitexecdir
 OTHER_PROGRAMS += git$X
@@ -3943,13 +3945,12 @@ unit-tests: $(UNIT_TEST_PROGS) $(CLAR_TEST_PROG) t/helper/test-tool$X
 	$(MAKE) -C t/ unit-tests
 
 .PHONY: libgit-sys libgit-rs
-libgit-sys libgit-rs:
-	$(QUIET)(\
-		cd contrib/$@ && \
-		cargo build \
-	)
+libgit-sys:
+	$(QUIET)cargo build --manifest-path contrib/libgit-sys/Cargo.toml
+libgit-rs: libgit-sys
+	$(QUIET)cargo build --manifest-path contrib/libgit-rs/Cargo.toml
 ifdef INCLUDE_LIBGIT_RS
-all:: libgit-sys libgit-rs
+all:: libgit-rs
 endif
 
 LIBGIT_PUB_OBJS += contrib/libgit-sys/public_symbol_export.o
