@@ -168,7 +168,7 @@ static int tree_is_complete(const struct object_id *oid)
 	complete = 1;
 	while (tree_entry(&desc, &entry)) {
 		if (!odb_has_object(the_repository->objects, &entry.oid,
-				HAS_OBJECT_RECHECK_PACKED | HAS_OBJECT_FETCH_PROMISOR) ||
+				ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR) ||
 		    (S_ISDIR(entry.mode) && !tree_is_complete(&entry.oid))) {
 			tree->object.flags |= INCOMPLETE;
 			complete = 0;
@@ -493,7 +493,7 @@ void reflog_expiry_cleanup(void *cb_data)
 	case UE_HEAD:
 		for (elem = cb->tips; elem; elem = elem->next)
 			clear_commit_marks(elem->item, REACHABLE);
-		free_commit_list(cb->tips);
+		commit_list_free(cb->tips);
 		break;
 	case UE_NORMAL:
 		clear_commit_marks(cb->tip_commit, REACHABLE);
@@ -501,7 +501,7 @@ void reflog_expiry_cleanup(void *cb_data)
 	}
 	for (elem = cb->mark_list; elem; elem = elem->next)
 		clear_commit_marks(elem->item, REACHABLE);
-	free_commit_list(cb->mark_list);
+	commit_list_free(cb->mark_list);
 }
 
 int count_reflog_ent(const char *refname UNUSED,

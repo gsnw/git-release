@@ -1188,7 +1188,7 @@ static void am_append_signoff(struct am_state *state)
 {
 	struct strbuf sb = STRBUF_INIT;
 
-	strbuf_attach(&sb, state->msg, state->msg_len, state->msg_len);
+	strbuf_attach(&sb, state->msg, state->msg_len, state->msg_len + 1);
 	append_signoff(&sb, 0, 0);
 	state->msg = strbuf_detach(&sb, &state->msg_len);
 }
@@ -1726,7 +1726,7 @@ static void do_commit(const struct am_state *state)
 
 	run_hooks(the_repository, "post-applypatch");
 
-	free_commit_list(parents);
+	commit_list_free(parents);
 	strbuf_release(&sb);
 }
 
@@ -1937,7 +1937,7 @@ next:
 	 */
 	if (!state->rebasing) {
 		am_destroy(state);
-		run_auto_maintenance(state->quiet);
+		run_auto_maintenance(the_repository, state->quiet);
 	}
 }
 

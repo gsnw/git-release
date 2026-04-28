@@ -64,6 +64,7 @@ manpages = {
   'git-gui.adoc' : 1,
   'git-hash-object.adoc' : 1,
   'git-help.adoc' : 1,
+  'git-history.adoc' : 1,
   'git-hook.adoc' : 1,
   'git-http-backend.adoc' : 1,
   'git-http-fetch.adoc' : 1,
@@ -353,12 +354,9 @@ foreach mode : [ 'diff', 'merge' ]
     command: [
       shell,
       '@INPUT@',
-      '..',
+      meson.project_source_root(),
       mode,
       '@OUTPUT@'
-    ],
-    env: [
-      'MERGE_TOOLS_DIR=' + meson.project_source_root() / 'mergetools',
     ],
     input: 'generate-mergetool-list.sh',
     output: 'mergetools-' + mode + '.adoc',

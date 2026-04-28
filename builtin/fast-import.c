@@ -190,6 +190,8 @@ static const char *global_prefix;
 
 static enum sign_mode signed_tag_mode = SIGN_VERBATIM;
 static enum sign_mode signed_commit_mode = SIGN_VERBATIM;
+static const char *signed_commit_keyid;
+static const char *signed_tag_keyid;
 
 /* Memory pools */
 static struct mem_pool fi_mem_pool = {
@@ -875,6 +877,7 @@ static void end_packfile(void)
 	running = 1;
 	clear_delta_base_cache();
 	if (object_count) {
+		struct odb_source_files *files = odb_source_files_downcast(pack_data->repo->objects->sources);
 		struct packed_git *new_p;
 		struct object_id cur_pack_oid;
 		char *idx_name;
@@ -900,8 +903,7 @@ static void end_packfile(void)
 		idx_name = keep_pack(create_index());
 
 		/* Register the packfile with core git's machinery. */
-		new_p = packfile_store_load_pack(pack_data->repo->objects->sources->packfiles,
-						 idx_name, 1);
+		new_p = packfile_store_load_pack(files->packed, idx_name, 1);
 		if (!new_p)
 			die(_("core Git rejected index %s"), idx_name);
 		all_packs[pack_id] = new_p;
@@ -982,7 +984,9 @@ static int store_object(
 	}
 
 	for (source = the_repository->objects->sources; source; source = source->next) {
-		if (!packfile_list_find_oid(packfile_store_get_packs(source->packfiles), &oid))
+		struct odb_source_files *files = odb_source_files_downcast(source);
+
+		if (!packfile_list_find_oid(packfile_store_get_packs(files->packed), &oid))
 			continue;
 		e->type = type;
 		e->pack_id = MAX_PACK_ID;
@@ -1187,7 +1191,9 @@ static void stream_blob(uintmax_t len, struct object_id *oidout, uintmax_t mark)
 	}
 
 	for (source = the_repository->objects->sources; source; source = source->next) {
-		if (!packfile_list_find_oid(packfile_store_get_packs(source->packfiles), &oid))
+		struct odb_source_files *files = odb_source_files_downcast(source);
+
+		if (!packfile_list_find_oid(packfile_store_get_packs(files->packed), &oid))
 			continue;
 		e->type = OBJ_BLOB;
 		e->pack_id = MAX_PACK_ID;
@@ -2836,10 +2842,46 @@ static void finalize_commit_buffer(struct strbuf *new_data,
 	strbuf_addbuf(new_data, msg);
 }
 
-static void handle_strip_if_invalid(struct strbuf *new_data,
-				    struct signature_data *sig_sha1,
-				    struct signature_data *sig_sha256,
-				    struct strbuf *msg)
+static void warn_invalid_signature(struct signature_check *check,
+				   const char *msg, enum sign_mode mode)
+{
+	const char *signer = check->signer ? check->signer : _("unknown");
+	const char *subject;
+	int subject_len = find_commit_subject(msg, &subject);
+
+	switch (mode) {
+	case SIGN_STRIP_IF_INVALID:
+		if (subject_len > 100)
+			warning(_("stripping invalid signature for commit '%.100s...'\n"
+				  "  allegedly by %s"), subject, signer);
+		else if (subject_len > 0)
+			warning(_("stripping invalid signature for commit '%.*s'\n"
+				  "  allegedly by %s"), subject_len, subject, signer);
+		else
+			warning(_("stripping invalid signature for commit\n"
+				  "  allegedly by %s"), signer);
+		break;
+	case SIGN_SIGN_IF_INVALID:
+		if (subject_len > 100)
+			warning(_("replacing invalid signature for commit '%.100s...'\n"
+				  "  allegedly by %s"), subject, signer);
+		else if (subject_len > 0)
+			warning(_("replacing invalid signature for commit '%.*s'\n"
+				  "  allegedly by %s"), subject_len, subject, signer);
+		else
+			warning(_("replacing invalid signature for commit\n"
+				  "  allegedly by %s"), signer);
+		break;
+	default:
+		BUG("unsupported signing mode");
+	}
+}
+
+static void handle_signature_if_invalid(struct strbuf *new_data,
+					struct signature_data *sig_sha1,
+					struct signature_data *sig_sha256,
+					struct strbuf *msg,
+					enum sign_mode mode)
 {
 	struct strbuf tmp_buf = STRBUF_INIT;
 	struct signature_check signature_check = { 0 };
@@ -2851,20 +2893,37 @@ static void handle_strip_if_invalid(struct strbuf *new_data,
 	ret = verify_commit_buffer(tmp_buf.buf, tmp_buf.len, &signature_check);
 
 	if (ret) {
-		const char *signer = signature_check.signer ?
-			signature_check.signer : _("unknown");
-		const char *subject;
-		int subject_len = find_commit_subject(msg->buf, &subject);
+		if (mode == SIGN_ABORT_IF_INVALID)
+			die(_("aborting due to invalid signature"));
 
-		if (subject_len > 100)
-			warning(_("stripping invalid signature for commit '%.100s...'\n"
-				  "  allegedly by %s"), subject, signer);
-		else if (subject_len > 0)
-			warning(_("stripping invalid signature for commit '%.*s'\n"
-				  "  allegedly by %s"), subject_len, subject, signer);
-		else
-			warning(_("stripping invalid signature for commit\n"
-				  "  allegedly by %s"), signer);
+		warn_invalid_signature(&signature_check, msg->buf, mode);
+
+		if (mode == SIGN_SIGN_IF_INVALID) {
+			struct strbuf signature = STRBUF_INIT;
+			struct strbuf payload = STRBUF_INIT;
+
+			/*
+			 * NEEDSWORK: To properly support interoperability mode
+			 * when signing commit signatures, the commit buffer
+			 * must be provided in both the repository and
+			 * compatibility object formats. As currently
+			 * implemented, only the repository object format is
+			 * considered meaning compatibility signatures cannot be
+			 * generated. Thus, attempting to sign commit signatures
+			 * in interoperability mode is currently unsupported.
+			 */
+			if (the_repository->compat_hash_algo)
+				die(_("signing commits in interoperability mode is unsupported"));
+
+			strbuf_addstr(&payload, signature_check.payload);
+			if (sign_buffer(&payload, &signature, signed_commit_keyid,
+					SIGN_BUFFER_USE_DEFAULT_KEY))
+				die(_("failed to sign commit object"));
+			add_header_signature(new_data, &signature, the_hash_algo);
+
+			strbuf_release(&signature);
+			strbuf_release(&payload);
+		}
 
 		finalize_commit_buffer(new_data, NULL, NULL, msg);
 	} else {
@@ -2927,6 +2986,8 @@ static void parse_new_commit(const char *arg)
 			/* fallthru */
 		case SIGN_VERBATIM:
 		case SIGN_STRIP_IF_INVALID:
+		case SIGN_SIGN_IF_INVALID:
+		case SIGN_ABORT_IF_INVALID:
 			import_one_signature(&sig_sha1, &sig_sha256, v);
 			break;
 
@@ -3011,9 +3072,12 @@ static void parse_new_commit(const char *arg)
 			"encoding %s\n",
 			encoding);
 
-	if (signed_commit_mode == SIGN_STRIP_IF_INVALID &&
+	if ((signed_commit_mode == SIGN_STRIP_IF_INVALID ||
+	     signed_commit_mode == SIGN_SIGN_IF_INVALID ||
+	     signed_commit_mode == SIGN_ABORT_IF_INVALID) &&
 	    (sig_sha1.hash_algo || sig_sha256.hash_algo))
-		handle_strip_if_invalid(&new_data, &sig_sha1, &sig_sha256, &msg);
+		handle_signature_if_invalid(&new_data, &sig_sha1, &sig_sha256,
+					    &msg, signed_commit_mode);
 	else
 		finalize_commit_buffer(&new_data, &sig_sha1, &sig_sha256, &msg);
 
@@ -3026,7 +3090,50 @@ static void parse_new_commit(const char *arg)
 	b->last_commit = object_count_by_type[OBJ_COMMIT];
 }
 
-static void handle_tag_signature(struct strbuf *msg, const char *name)
+static void handle_tag_signature_if_invalid(struct strbuf *buf,
+					    struct strbuf *msg,
+					    size_t sig_offset)
+{
+	struct strbuf signature = STRBUF_INIT;
+	struct strbuf payload = STRBUF_INIT;
+	struct signature_check sigc = { 0 };
+
+	strbuf_addbuf(&payload, buf);
+	strbuf_addch(&payload, '\n');
+	strbuf_add(&payload, msg->buf, sig_offset);
+	strbuf_add(&signature, msg->buf + sig_offset, msg->len - sig_offset);
+
+	sigc.payload_type = SIGNATURE_PAYLOAD_TAG;
+	sigc.payload = strbuf_detach(&payload, &sigc.payload_len);
+
+	if (!check_signature(&sigc, signature.buf, signature.len))
+		goto out;
+
+	if (signed_tag_mode == SIGN_ABORT_IF_INVALID)
+		die(_("aborting due to invalid signature"));
+
+	strbuf_setlen(msg, sig_offset);
+
+	if (signed_tag_mode == SIGN_SIGN_IF_INVALID) {
+		strbuf_attach(&payload, sigc.payload, sigc.payload_len,
+			      sigc.payload_len + 1);
+		sigc.payload = NULL;
+		strbuf_reset(&signature);
+
+		if (sign_buffer(&payload, &signature, signed_tag_keyid,
+				SIGN_BUFFER_USE_DEFAULT_KEY))
+			die(_("failed to sign tag object"));
+
+		strbuf_addbuf(msg, &signature);
+	}
+
+out:
+	signature_check_clear(&sigc);
+	strbuf_release(&signature);
+	strbuf_release(&payload);
+}
+
+static void handle_tag_signature(struct strbuf *buf, struct strbuf *msg, const char *name)
 {
 	size_t sig_offset = parse_signed_buffer(msg->buf, msg->len);
 
@@ -3052,14 +3159,16 @@ static void handle_tag_signature(struct strbuf *msg, const char *name)
 		/* Truncate the buffer to remove the signature */
 		strbuf_setlen(msg, sig_offset);
 		break;
+	case SIGN_ABORT_IF_INVALID:
+	case SIGN_SIGN_IF_INVALID:
+	case SIGN_STRIP_IF_INVALID:
+		handle_tag_signature_if_invalid(buf, msg, sig_offset);
+		break;
 
 	/* Third, aborting modes */
 	case SIGN_ABORT:
 		die(_("encountered signed tag; use "
 		      "--signed-tags=<mode> to handle it"));
-	case SIGN_STRIP_IF_INVALID:
-		die(_("'strip-if-invalid' is not a valid mode for "
-		      "git fast-import with --signed-tags=<mode>"));
 	default:
 		BUG("invalid signed_tag_mode value %d from tag '%s'",
 		    signed_tag_mode, name);
@@ -3129,8 +3238,6 @@ static void parse_new_tag(const char *arg)
 	/* tag payload/message */
 	parse_data(&msg, 0, NULL);
 
-	handle_tag_signature(&msg, t->name);
-
 	/* build the tag object */
 	strbuf_reset(&new_data);
 
@@ -3142,6 +3249,9 @@ static void parse_new_tag(const char *arg)
 	if (tagger)
 		strbuf_addf(&new_data,
 			    "tagger %s\n", tagger);
+
+	handle_tag_signature(&new_data, &msg, t->name);
+
 	strbuf_addch(&new_data, '\n');
 	strbuf_addbuf(&new_data, &msg);
 	free(tagger);
@@ -3246,7 +3356,7 @@ static void cat_blob(struct object_entry *oe, struct object_id *oid)
 	cat_blob_write("\n", 1);
 	if (oe && oe->pack_id == pack_id) {
 		last_blob.offset = oe->idx.offset;
-		strbuf_attach(&last_blob.data, buf, size, size);
+		strbuf_attach(&last_blob.data, buf, size, size + 1);
 		last_blob.depth = oe->depth;
 	} else
 		free(buf);
@@ -3649,10 +3759,10 @@ static int parse_one_option(const char *option)
 	} else if (skip_prefix(option, "export-pack-edges=", &option)) {
 		option_export_pack_edges(option);
 	} else if (skip_prefix(option, "signed-commits=", &option)) {
-		if (parse_sign_mode(option, &signed_commit_mode))
+		if (parse_sign_mode(option, &signed_commit_mode, &signed_commit_keyid))
 			usagef(_("unknown --signed-commits mode '%s'"), option);
 	} else if (skip_prefix(option, "signed-tags=", &option)) {
-		if (parse_sign_mode(option, &signed_tag_mode))
+		if (parse_sign_mode(option, &signed_tag_mode, &signed_tag_keyid))
 			usagef(_("unknown --signed-tags mode '%s'"), option);
 	} else if (!strcmp(option, "quiet")) {
 		show_stats = 0;

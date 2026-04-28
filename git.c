@@ -119,7 +119,7 @@ static int list_cmds(const char *spec)
 	}
 	for (size_t i = 0; i < list.nr; i++)
 		puts(list.items[i].string);
-	string_list_clear(&list, 0);
+	string_list_clear(&list, 1);
 	return 0;
 }
 
@@ -586,7 +586,8 @@ static struct cmd_struct commands[] = {
 	{ "grep", cmd_grep, RUN_SETUP_GENTLY },
 	{ "hash-object", cmd_hash_object },
 	{ "help", cmd_help },
-	{ "hook", cmd_hook, RUN_SETUP },
+	{ "history", cmd_history, RUN_SETUP },
+	{ "hook", cmd_hook, RUN_SETUP_GENTLY },
 	{ "index-pack", cmd_index_pack, RUN_SETUP_GENTLY | NO_PARSEOPT },
 	{ "init", cmd_init_db },
 	{ "init-db", cmd_init_db },
@@ -876,8 +877,7 @@ static int run_argv(struct strvec *args)
 			commit_pager_choice();
 
 			strvec_push(&cmd.args, "git");
-			for (size_t i = 0; i < args->nr; i++)
-				strvec_push(&cmd.args, args->v[i]);
+			strvec_pushv(&cmd.args, args->v);
 
 			trace_argv_printf(cmd.args.v, "trace: exec:");
 

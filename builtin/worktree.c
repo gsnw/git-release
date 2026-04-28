@@ -252,7 +252,7 @@ static int prune(int ac, const char **av, const char *prefix,
 		OPT__DRY_RUN(&show_only, N_("do not remove, show only")),
 		OPT__VERBOSE(&verbose, N_("report pruned working trees")),
 		OPT_EXPIRY_DATE(0, "expire", &expire,
-				N_("expire working trees older than <time>")),
+				N_("prune missing working trees older than <time>")),
 		OPT_END()
 	};
 
@@ -425,6 +425,39 @@ static int make_worktree_orphan(const char * ref, const struct add_opts *opts,
 	return run_command(&cp);
 }
 
+/*
+ * References for worktrees are generally stored in '$GIT_DIR/worktrees/<wt_id>'.
+ * But when using alternate reference directories, we want to store the worktree
+ * references in '$ALTERNATE_REFERENCE_DIR/worktrees/<wt_id>'.
+ *
+ * Create the necessary folder structure to facilitate the same. But to ensure
+ * that the former path is still considered a Git directory, add stubs.
+ */
+static void setup_alternate_ref_dir(struct worktree *wt, const char *wt_git_path)
+{
+	struct strbuf sb = STRBUF_INIT;
+	char *path;
+
+	path = wt->repo->ref_storage_payload;
+	if (!path)
+		return;
+
+	if (!is_absolute_path(path))
+		strbuf_addf(&sb, "%s/", wt->repo->commondir);
+
+	strbuf_addf(&sb, "%s/worktrees", path);
+	safe_create_dir(wt->repo, sb.buf, 1);
+	strbuf_addf(&sb, "/%s", wt->id);
+	safe_create_dir(wt->repo, sb.buf, 1);
+	strbuf_reset(&sb);
+
+	strbuf_addf(&sb, "this worktree stores references in %s/worktrees/%s",
+		    path, wt->id);
+	refs_create_refdir_stubs(wt->repo, wt_git_path, sb.buf);
+
+	strbuf_release(&sb);
+}
+
 static int add_worktree(const char *path, const char *refname,
 			const struct add_opts *opts)
 {
@@ -440,6 +473,7 @@ static int add_worktree(const char *path, const char *refname,
 	struct strbuf sb_name = STRBUF_INIT;
 	struct worktree **worktrees, *wt = NULL;
 	struct ref_store *wt_refs;
+	struct repo_config_values *cfg = repo_config_values(the_repository);
 
 	worktrees = get_worktrees();
 	check_candidate_path(path, opts->force, worktrees, "add");
@@ -505,7 +539,7 @@ static int add_worktree(const char *path, const char *refname,
 
 	strbuf_reset(&sb);
 	strbuf_addf(&sb, "%s/gitdir", sb_repo.buf);
-	write_worktree_linking_files(sb_git, sb, opts->relative_paths);
+	write_worktree_linking_files(sb_git.buf, sb.buf, opts->relative_paths);
 	strbuf_reset(&sb);
 	strbuf_addf(&sb, "%s/commondir", sb_repo.buf);
 	write_file(sb.buf, "../..");
@@ -518,6 +552,7 @@ static int add_worktree(const char *path, const char *refname,
 		ret = error(_("could not find created worktree '%s'"), name);
 		goto done;
 	}
+	setup_alternate_ref_dir(wt, sb_repo.buf);
 	wt_refs = get_worktree_ref_store(wt);
 
 	ret = ref_store_create_on_disk(wt_refs, REF_STORE_CREATE_ON_DISK_IS_WORKTREE, &sb);
@@ -536,7 +571,7 @@ static int add_worktree(const char *path, const char *refname,
 	 * If the current worktree has sparse-checkout enabled, then copy
 	 * the sparse-checkout patterns from the current worktree.
 	 */
-	if (core_apply_sparse_checkout)
+	if (cfg->apply_sparse_checkout)
 		copy_sparse_checkout(sb_repo.buf);
 
 	/*
@@ -657,25 +692,8 @@ static int can_use_local_refs(const struct add_opts *opts)
 	if (refs_head_ref(get_main_ref_store(the_repository), first_valid_ref, NULL)) {
 		return 1;
 	} else if (refs_for_each_branch_ref(get_main_ref_store(the_repository), first_valid_ref, NULL)) {
-		if (!opts->quiet) {
-			struct strbuf path = STRBUF_INIT;
-			struct strbuf contents = STRBUF_INIT;
-			char *wt_gitdir = get_worktree_git_dir(NULL);
-
-			strbuf_add_real_path(&path, wt_gitdir);
-			strbuf_addstr(&path, "/HEAD");
-			strbuf_read_file(&contents, path.buf, 64);
-			strbuf_stripspace(&contents, NULL);
-			strbuf_strip_suffix(&contents, "\n");
-
-			warning(_("HEAD points to an invalid (or orphaned) reference.\n"
-				  "HEAD path: '%s'\n"
-				  "HEAD contents: '%s'"),
-				  path.buf, contents.buf);
-			strbuf_release(&path);
-			strbuf_release(&contents);
-			free(wt_gitdir);
-		}
+		if (!opts->quiet)
+			warning(_("HEAD points to an invalid (or orphaned) reference.\n"));
 		return 1;
 	}
 	return 0;
@@ -1070,7 +1088,7 @@ static int list(int ac, const char **av, const char *prefix,
 		OPT_BOOL(0, "porcelain", &porcelain, N_("machine-readable output")),
 		OPT__VERBOSE(&verbose, N_("show extended annotations and reasons, if available")),
 		OPT_EXPIRY_DATE(0, "expire", &expire,
-				N_("add 'prunable' annotation to worktrees older than <time>")),
+				N_("add 'prunable' annotation to missing worktrees older than <time>")),
 		OPT_SET_INT('z', NULL, &line_terminator,
 			    N_("terminate records with a NUL character"), '\0'),
 		OPT_END()
@@ -1191,14 +1209,14 @@ static void validate_no_submodules(const struct worktree *wt)
 
 	wt_gitdir = get_worktree_git_dir(wt);
 
-	if (is_directory(worktree_git_path(the_repository, wt, "modules"))) {
+	if (is_directory(worktree_git_path(wt, "modules"))) {
 		/*
 		 * There could be false positives, e.g. the "modules"
 		 * directory exists but is empty. But it's a rare case and
 		 * this simpler check is probably good enough for now.
 		 */
 		found_submodules = 1;
-	} else if (read_index_from(&istate, worktree_git_path(the_repository, wt, "index"),
+	} else if (read_index_from(&istate, worktree_git_path(wt, "index"),
 				   wt_gitdir) > 0) {
 		for (i = 0; i < istate.cache_nr; i++) {
 			struct cache_entry *ce = istate.cache[i];

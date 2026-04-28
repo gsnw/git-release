@@ -482,7 +482,7 @@ static int grep_submodule(struct grep_opt *opt,
 	 *	"forget" the sparse-index feature switch. As a result, the index
 	 *	of these submodules are expanded unexpectedly.
 	 *
-	 * 2. "core_apply_sparse_checkout"
+	 * 2. "config_values_private_.apply_sparse_checkout"
 	 *	When running `grep` in the superproject, this setting is
 	 *	populated using the superproject's configs. However, once
 	 *	initialized, this config is globally accessible and is read by
@@ -1218,8 +1218,10 @@ int cmd_grep(int argc,
 			struct odb_source *source;
 
 			odb_prepare_alternates(the_repository->objects);
-			for (source = the_repository->objects->sources; source; source = source->next)
-				packfile_store_prepare(source->packfiles);
+			for (source = the_repository->objects->sources; source; source = source->next) {
+				struct odb_source_files *files = odb_source_files_downcast(source);
+				packfile_store_prepare(files->packed);
+			}
 		}
 
 		start_threads(&opt);

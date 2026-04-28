@@ -35,6 +35,7 @@ struct backfill_context {
 	struct oid_array current_batch;
 	size_t min_batch_size;
 	int sparse;
+	struct rev_info revs;
 };
 
 static void backfill_context_clear(struct backfill_context *ctx)
@@ -67,8 +68,7 @@ static int fill_missing_blobs(const char *path UNUSED,
 		return 0;
 
 	for (size_t i = 0; i < list->nr; i++) {
-		if (!odb_has_object(ctx->repo->objects, &list->oid[i],
-				    OBJECT_INFO_FOR_PREFETCH))
+		if (!odb_has_object(ctx->repo->objects, &list->oid[i], 0))
 			oid_array_append(&ctx->current_batch, &list->oid[i]);
 	}
 
@@ -80,7 +80,6 @@ static int fill_missing_blobs(const char *path UNUSED,
 
 static int do_backfill(struct backfill_context *ctx)
 {
-	struct rev_info revs;
 	struct path_walk_info info = PATH_WALK_INFO_INIT;
 	int ret;
 
@@ -92,13 +91,14 @@ static int do_backfill(struct backfill_context *ctx)
 		}
 	}
 
-	repo_init_revisions(ctx->repo, &revs, "");
-	handle_revision_arg("HEAD", &revs, 0, 0);
+	/* Walk from HEAD if otherwise unspecified. */
+	if (!ctx->revs.pending.nr)
+		add_head_to_pending(&ctx->revs);
 
 	info.blobs = 1;
 	info.tags = info.commits = info.trees = 0;
 
-	info.revs = &revs;
+	info.revs = &ctx->revs;
 	info.path_fn = fill_missing_blobs;
 	info.path_fn_data = ctx;
 
@@ -109,7 +109,6 @@ static int do_backfill(struct backfill_context *ctx)
 		download_batch(ctx);
 
 	path_walk_info_clear(&info);
-	release_revisions(&revs);
 	return ret;
 }
 
@@ -120,7 +119,8 @@ int cmd_backfill(int argc, const char **argv, const char *prefix, struct reposit
 		.repo = repo,
 		.current_batch = OID_ARRAY_INIT,
 		.min_batch_size = 50000,
-		.sparse = 0,
+		.sparse = -1,
+		.revs = REV_INFO_INIT,
 	};
 	struct option options[] = {
 		OPT_UNSIGNED(0, "min-batch-size", &ctx.min_batch_size,
@@ -129,19 +129,29 @@ int cmd_backfill(int argc, const char **argv, const char *prefix, struct reposit
 			 N_("Restrict the missing objects to the current sparse-checkout")),
 		OPT_END(),
 	};
+	struct repo_config_values *cfg = repo_config_values(the_repository);
 
 	show_usage_with_options_if_asked(argc, argv,
 					 builtin_backfill_usage, options);
 
 	argc = parse_options(argc, argv, prefix, options, builtin_backfill_usage,
-			     0);
+			     PARSE_OPT_KEEP_UNKNOWN_OPT |
+			     PARSE_OPT_KEEP_ARGV0 |
+			     PARSE_OPT_KEEP_DASHDASH);
+
+	repo_init_revisions(repo, &ctx.revs, prefix);
+	argc = setup_revisions(argc, argv, &ctx.revs, NULL);
+
+	if (argc > 1)
+		die(_("unrecognized argument: %s"), argv[1]);
 
 	repo_config(repo, git_default_config, NULL);
 
 	if (ctx.sparse < 0)
-		ctx.sparse = core_apply_sparse_checkout;
+		ctx.sparse = cfg->apply_sparse_checkout;
 
 	result = do_backfill(&ctx);
 	backfill_context_clear(&ctx);
+	release_revisions(&ctx.revs);
 	return result;
 }

@@ -965,7 +965,7 @@ static int fill_commit_in_graph(struct commit *item,
 	do {
 		if (g->chunk_extra_edges_size / sizeof(uint32_t) <= parent_data_pos) {
 			error(_("commit-graph extra-edges pointer out of bounds"));
-			free_commit_list(item->parents);
+			commit_list_free(item->parents);
 			item->parents = NULL;
 			item->object.parsed = 0;
 			return 0;
@@ -1319,6 +1319,37 @@ static int write_graph_chunk_data(struct hashfile *f,
 	return 0;
 }
 
+/*
+ * Compute the generation offset between the commit date and its generation.
+ * This is what's ultimately stored as generation number in the commit graph.
+ *
+ * Note that the computation of the commit date is more involved than you might
+ * think. Instead of using the full commit date, we're in fact masking bits so
+ * that only the 34 lowest bits are considered. This results from the fact that
+ * commit graphs themselves only ever store 34 bits of the commit date
+ * themselves.
+ *
+ * This means that if we have a commit date that exceeds 34 bits we'll end up
+ * in situations where depending on whether the commit has been parsed from the
+ * object database or the commit graph we'll have different dates, where the
+ * ones parsed from the object database would have full 64 bit precision.
+ *
+ * But ultimately, we only ever want the offset to be relative to what we
+ * actually end up storing on disk, and hence we have to mask all the other
+ * bits.
+ */
+static timestamp_t compute_generation_offset(struct commit *c)
+{
+	timestamp_t masked_date;
+
+	if (sizeof(timestamp_t) > 4)
+		masked_date = c->date & (((timestamp_t) 1 << 34) - 1);
+	else
+		masked_date = c->date;
+
+	return commit_graph_data_at(c)->generation - masked_date;
+}
+
 static int write_graph_chunk_generation_data(struct hashfile *f,
 					     void *data)
 {
@@ -1329,7 +1360,7 @@ static int write_graph_chunk_generation_data(struct hashfile *f,
 		struct commit *c = ctx->commits.items[i];
 		timestamp_t offset;
 		repo_parse_commit(ctx->r, c);
-		offset = commit_graph_data_at(c)->generation - c->date;
+		offset = compute_generation_offset(c);
 		display_progress(ctx->progress, ++ctx->progress_cnt);
 
 		if (offset > GENERATION_NUMBER_V2_OFFSET_MAX) {
@@ -1350,7 +1381,7 @@ static int write_graph_chunk_generation_data_overflow(struct hashfile *f,
 	int i;
 	for (i = 0; i < ctx->commits.nr; i++) {
 		struct commit *c = ctx->commits.items[i];
-		timestamp_t offset = commit_graph_data_at(c)->generation - c->date;
+		timestamp_t offset = compute_generation_offset(c);
 		display_progress(ctx->progress, ++ctx->progress_cnt);
 
 		if (offset > GENERATION_NUMBER_V2_OFFSET_MAX) {
@@ -1479,30 +1510,38 @@ static int write_graph_chunk_bloom_data(struct hashfile *f,
 	return 0;
 }
 
-static int add_packed_commits(const struct object_id *oid,
-			      struct packed_git *pack,
-			      uint32_t pos,
-			      void *data)
+static int add_packed_commits_oi(const struct object_id *oid,
+				 struct object_info *oi,
+				 void *data)
 {
 	struct write_commit_graph_context *ctx = (struct write_commit_graph_context*)data;
-	enum object_type type;
-	off_t offset = nth_packed_object_offset(pack, pos);
-	struct object_info oi = OBJECT_INFO_INIT;
 
 	if (ctx->progress)
 		display_progress(ctx->progress, ++ctx->progress_done);
 
-	oi.typep = &type;
-	if (packed_object_info(pack, offset, &oi) < 0)
-		die(_("unable to get type of object %s"), oid_to_hex(oid));
-
-	if (type != OBJ_COMMIT)
+	if (*oi->typep != OBJ_COMMIT)
 		return 0;
 
 	oid_array_append(&ctx->oids, oid);
 	set_commit_pos(ctx->r, oid);
 
 	return 0;
+}
+
+static int add_packed_commits(const struct object_id *oid,
+			      struct packed_git *pack,
+			      uint32_t pos,
+			      void *data)
+{
+	enum object_type type;
+	off_t offset = nth_packed_object_offset(pack, pos);
+	struct object_info oi = OBJECT_INFO_INIT;
+
+	oi.typep = &type;
+	if (packed_object_info(pack, offset, &oi) < 0)
+		die(_("unable to get type of object %s"), oid_to_hex(oid));
+
+	return add_packed_commits_oi(oid, &oi, data);
 }
 
 static void add_missing_parents(struct write_commit_graph_context *ctx, struct commit *commit)
@@ -1733,7 +1772,7 @@ static void compute_generation_numbers(struct write_commit_graph_context *ctx)
 
 	for (i = 0; i < ctx->commits.nr; i++) {
 		struct commit *c = ctx->commits.items[i];
-		timestamp_t offset = commit_graph_data_at(c)->generation - c->date;
+		timestamp_t offset = compute_generation_offset(c);
 		if (offset > GENERATION_NUMBER_V2_OFFSET_MAX)
 			ctx->num_generation_data_overflows++;
 	}
@@ -1927,7 +1966,7 @@ static int fill_oids_from_packs(struct write_commit_graph_context *ctx,
 			goto cleanup;
 		}
 		for_each_object_in_pack(p, add_packed_commits, ctx,
-					FOR_EACH_OBJECT_PACK_ORDER);
+					ODB_FOR_EACH_OBJECT_PACK_ORDER);
 		close_pack(p);
 		free(p);
 	}
@@ -1959,13 +1998,28 @@ static int fill_oids_from_commits(struct write_commit_graph_context *ctx,
 
 static void fill_oids_from_all_packs(struct write_commit_graph_context *ctx)
 {
+	struct odb_source *source;
+	enum object_type type;
+	struct odb_for_each_object_options opts = {
+		.flags = ODB_FOR_EACH_OBJECT_PACK_ORDER,
+	};
+	struct object_info oi = {
+		.typep = &type,
+	};
+
 	if (ctx->report_progress)
 		ctx->progress = start_delayed_progress(
 			ctx->r,
 			_("Finding commits for commit graph among packed objects"),
 			ctx->approx_nr_objects);
-	for_each_packed_object(ctx->r, add_packed_commits, ctx,
-			       FOR_EACH_OBJECT_PACK_ORDER);
+
+	odb_prepare_alternates(ctx->r->objects);
+	for (source = ctx->r->objects->sources; source; source = source->next) {
+		struct odb_source_files *files = odb_source_files_downcast(source);
+		packfile_store_for_each_object(files->packed, &oi, add_packed_commits_oi,
+					       ctx, &opts);
+	}
+
 	if (ctx->progress_done < ctx->approx_nr_objects)
 		display_progress(ctx->progress, ctx->approx_nr_objects);
 	stop_progress(&ctx->progress);
@@ -2587,7 +2641,8 @@ int write_commit_graph(struct odb_source *source,
 			replace = ctx.opts->split_flags & COMMIT_GRAPH_SPLIT_REPLACE;
 	}
 
-	ctx.approx_nr_objects = repo_approximate_object_count(r);
+	if (odb_count_objects(r->objects, ODB_COUNT_OBJECTS_APPROXIMATE, &ctx.approx_nr_objects) < 0)
+		ctx.approx_nr_objects = 0;
 
 	if (ctx.append && g) {
 		for (i = 0; i < g->num_commits; i++) {

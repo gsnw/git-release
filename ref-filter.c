@@ -1753,7 +1753,7 @@ static void grab_person(const char *who, struct atom_value *val, int deref, void
 		    (starts_with(name + wholen, "email") &&
 		    (atom->u.email_option.option & EO_MAILMAP))) {
 			if (!mailmap.items)
-				read_mailmap(&mailmap);
+				read_mailmap(the_repository, &mailmap);
 			strbuf_addstr(&mailmap_buf, buf);
 			apply_mailmap_to_header(&mailmap_buf, headers, &mailmap);
 			wholine = find_wholine(who, wholen, mailmap_buf.buf);
@@ -2173,32 +2173,34 @@ static inline char *copy_advance(char *dst, const char *src)
 	return dst;
 }
 
-static const char *lstrip_ref_components(const char *refname, int len)
+static int normalize_component_count(const char *refname, int len)
 {
-	long remaining = len;
-	const char *start = xstrdup(refname);
-	const char *to_free = start;
-
 	if (len < 0) {
-		int i;
-		const char *p = refname;
+		int slashes = 0;
 
-		/* Find total no of '/' separated path-components */
-		for (i = 0; p[i]; p[i] == '/' ? i++ : *p++)
-			;
+		for (const char *p = refname; *p; p++) {
+			if (*p == '/')
+				slashes++;
+		}
+
 		/*
 		 * The number of components we need to strip is now
 		 * the total minus the components to be left (Plus one
 		 * because we count the number of '/', but the number
 		 * of components is one more than the no of '/').
 		 */
-		remaining = i + len + 1;
+		len = slashes + len + 1;
 	}
+	return len;
+}
+
+static const char *lstrip_ref_components(const char *refname, int len)
+{
+	int remaining = normalize_component_count(refname, len);
 
 	while (remaining > 0) {
-		switch (*start++) {
+		switch (*refname++) {
 		case '\0':
-			free((char *)to_free);
 			return xstrdup("");
 		case '/':
 			remaining--;
@@ -2206,42 +2208,21 @@ static const char *lstrip_ref_components(const char *refname, int len)
 		}
 	}
 
-	start = xstrdup(start);
-	free((char *)to_free);
-	return start;
+	return xstrdup(refname);
 }
 
 static const char *rstrip_ref_components(const char *refname, int len)
 {
-	long remaining = len;
-	const char *start = xstrdup(refname);
-	const char *to_free = start;
+	int remaining = normalize_component_count(refname, len);
+	const char *end = refname + strlen(refname);
 
-	if (len < 0) {
-		int i;
-		const char *p = refname;
-
-		/* Find total no of '/' separated path-components */
-		for (i = 0; p[i]; p[i] == '/' ? i++ : *p++)
-			;
-		/*
-		 * The number of components we need to strip is now
-		 * the total minus the components to be left (Plus one
-		 * because we count the number of '/', but the number
-		 * of components is one more than the no of '/').
-		 */
-		remaining = i + len + 1;
-	}
-
-	while (remaining-- > 0) {
-		char *p = strrchr(start, '/');
-		if (!p) {
-			free((char *)to_free);
+	while (remaining > 0) {
+		if (end == refname)
 			return xstrdup("");
-		} else
-			p[0] = '\0';
+		if (*--end == '/')
+			remaining--;
 	}
-	return start;
+	return xmemdupz(refname, end - refname);
 }
 
 static const char *show_ref(struct refname_atom *atom, const char *refname)
@@ -2781,7 +2762,7 @@ static int start_ref_iterator_after(struct ref_iterator *iter, const char *marke
 	return ret;
 }
 
-static int for_each_fullref_with_seek(struct ref_filter *filter, each_ref_fn cb,
+static int for_each_fullref_with_seek(struct ref_filter *filter, refs_for_each_cb cb,
 				       void *cb_data, unsigned int flags)
 {
 	struct ref_iterator *iter;
@@ -2804,13 +2785,17 @@ static int for_each_fullref_with_seek(struct ref_filter *filter, each_ref_fn cb,
  * pattern match, so the callback still has to match each ref individually.
  */
 static int for_each_fullref_in_pattern(struct ref_filter *filter,
-				       each_ref_fn cb,
+				       refs_for_each_cb cb,
 				       void *cb_data)
 {
+	struct refs_for_each_ref_options opts = {
+		.exclude_patterns = filter->exclude.v,
+	};
+
 	if (filter->kind & FILTER_REFS_ROOT_REFS) {
 		/* In this case, we want to print all refs including root refs. */
 		return for_each_fullref_with_seek(filter, cb, cb_data,
-						  DO_FOR_EACH_INCLUDE_ROOT_REFS);
+						  REFS_FOR_EACH_INCLUDE_ROOT_REFS);
 	}
 
 	if (!filter->match_as_path) {
@@ -2836,10 +2821,9 @@ static int for_each_fullref_in_pattern(struct ref_filter *filter,
 		return for_each_fullref_with_seek(filter, cb, cb_data, 0);
 	}
 
-	return refs_for_each_fullref_in_prefixes(get_main_ref_store(the_repository),
-						 NULL, filter->name_patterns,
-						 filter->exclude.v,
-						 cb, cb_data);
+	return refs_for_each_ref_in_prefixes(get_main_ref_store(the_repository),
+					     filter->name_patterns, &opts,
+					     cb, cb_data);
 }
 
 /*
@@ -3303,7 +3287,7 @@ void filter_is_base(struct repository *r,
 	free(bases);
 }
 
-static int do_filter_refs(struct ref_filter *filter, unsigned int type, each_ref_fn fn, void *cb_data)
+static int do_filter_refs(struct ref_filter *filter, unsigned int type, refs_for_each_cb fn, void *cb_data)
 {
 	const char *prefix = NULL;
 	int ret = 0;
@@ -3782,9 +3766,9 @@ void ref_filter_clear(struct ref_filter *filter)
 {
 	strvec_clear(&filter->exclude);
 	oid_array_clear(&filter->points_at);
-	free_commit_list(filter->with_commit);
-	free_commit_list(filter->no_commit);
-	free_commit_list(filter->reachable_from);
-	free_commit_list(filter->unreachable_from);
+	commit_list_free(filter->with_commit);
+	commit_list_free(filter->no_commit);
+	commit_list_free(filter->reachable_from);
+	commit_list_free(filter->unreachable_from);
 	ref_filter_init(filter);
 }

@@ -53,8 +53,9 @@ define_commit_slab(active_paths_for_commit, struct bitmap *);
 struct last_modified {
 	struct hashmap paths;
 	struct rev_info rev;
-	bool recursive;
 	bool show_trees;
+	bool nul_termination;
+	int max_depth;
 
 	const char **all_paths;
 	size_t all_paths_nr;
@@ -123,7 +124,7 @@ static void add_path_from_diff(struct diff_queue_struct *q,
 
 static int populate_paths_from_revs(struct last_modified *lm)
 {
-	int num_interesting = 0;
+	int num_interesting = 0, ret = 0;
 	struct diff_options diffopt;
 
 	/*
@@ -145,16 +146,25 @@ static int populate_paths_from_revs(struct last_modified *lm)
 		if (obj->item->flags & UNINTERESTING)
 			continue;
 
-		if (num_interesting++)
-			return error(_("last-modified can only operate on one tree at a time"));
+		if (num_interesting++) {
+			ret = error(_("last-modified can only operate on one commit at a time"));
+			goto out;
+		}
+
+		if (!repo_peel_to_type(lm->rev.repo, obj->path, 0, obj->item, OBJ_COMMIT)) {
+			ret = error(_("revision argument '%s' is a %s, not a commit-ish"), obj->name, type_name(obj->item->type));
+			goto out;
+		}
 
 		diff_tree_oid(lm->rev.repo->hash_algo->empty_tree,
 			      &obj->item->oid, "", &diffopt);
 		diff_flush(&diffopt);
 	}
+
+out:
 	clear_pathspec(&diffopt.pathspec);
 
-	return 0;
+	return ret;
 }
 
 static void last_modified_emit(struct last_modified *lm,
@@ -165,10 +175,10 @@ static void last_modified_emit(struct last_modified *lm,
 		putchar('^');
 	printf("%s\t", oid_to_hex(&commit->object.oid));
 
-	if (lm->rev.diffopt.line_termination)
-		write_name_quoted(path, stdout, '\n');
-	else
+	if (lm->nul_termination)
 		printf("%s%c", path, '\0');
+	else
+		write_name_quoted(path, stdout, '\n');
 }
 
 static void mark_path(const char *path, const struct object_id *oid,
@@ -479,8 +489,10 @@ static int last_modified_init(struct last_modified *lm, struct repository *r,
 	lm->rev.no_commit_id = 1;
 	lm->rev.diff = 1;
 	lm->rev.diffopt.flags.no_recursive_diff_tree_combined = 1;
-	lm->rev.diffopt.flags.recursive = lm->recursive;
+	lm->rev.diffopt.flags.recursive = 1;
 	lm->rev.diffopt.flags.tree_in_recursive = lm->show_trees;
+	lm->rev.diffopt.max_depth = lm->max_depth;
+	lm->rev.diffopt.max_depth_valid = lm->max_depth >= 0;
 
 	argc = setup_revisions(argc, argv, &lm->rev, NULL);
 	if (argc > 1) {
@@ -491,7 +503,7 @@ static int last_modified_init(struct last_modified *lm, struct repository *r,
 	lm->rev.bloom_filter_settings = get_bloom_filter_settings(lm->rev.repo);
 
 	if (populate_paths_from_revs(lm) < 0)
-		return error(_("unable to setup last-modified"));
+		return -1;
 
 	CALLOC_ARRAY(lm->all_paths, hashmap_get_size(&lm->paths));
 	lm->all_paths_nr = 0;
@@ -510,16 +522,20 @@ int cmd_last_modified(int argc, const char **argv, const char *prefix,
 	struct last_modified lm = { 0 };
 
 	const char * const last_modified_usage[] = {
-		N_("git last-modified [--recursive] [--show-trees] "
-		   "[<revision-range>] [[--] <path>...]"),
+		N_("git last-modified [--recursive] [--show-trees] [--max-depth=<depth>] [-z]\n"
+		   "                  [<revision-range>] [[--] <pathspec>...]"),
 		NULL
 	};
 
 	struct option last_modified_options[] = {
-		OPT_BOOL('r', "recursive", &lm.recursive,
-			 N_("recurse into subtrees")),
+		OPT_SET_INT('r', "recursive", &lm.max_depth,
+			    N_("recurse into subtrees"), -1),
 		OPT_BOOL('t', "show-trees", &lm.show_trees,
 			 N_("show tree entries when recursing into subtrees")),
+		OPT_INTEGER_F(0, "max-depth", &lm.max_depth,
+			      N_("maximum tree depth to recurse"), PARSE_OPT_NONEG),
+		OPT_BOOL('z', NULL, &lm.nul_termination,
+			 N_("lines are separated with NUL character")),
 		OPT_END()
 	};
 

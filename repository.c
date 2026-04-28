@@ -1,8 +1,11 @@
 #include "git-compat-util.h"
 #include "abspath.h"
 #include "repository.h"
+#include "hook.h"
 #include "odb.h"
+#include "odb/source.h"
 #include "config.h"
+#include "gettext.h"
 #include "object.h"
 #include "lockfile.h"
 #include "path.h"
@@ -38,7 +41,7 @@ struct repository *the_repository = &the_repo;
 static void set_default_hash_algo(struct repository *repo)
 {
 	const char *hash_name;
-	int algo;
+	uint32_t algo;
 
 	hash_name = getenv("GIT_TEST_DEFAULT_HASH_ALGO");
 	if (!hash_name)
@@ -50,13 +53,27 @@ static void set_default_hash_algo(struct repository *repo)
 	repo_set_hash_algo(repo, algo);
 }
 
+struct repo_config_values *repo_config_values(struct repository *repo)
+{
+	if (repo != the_repository)
+		BUG("trying to read config from wrong repository instance");
+	if (!repo->initialized)
+		BUG("config values from uninitialized repository");
+	return &repo->config_values_private_;
+}
+
 void initialize_repository(struct repository *repo)
 {
+	if (repo->initialized)
+		BUG("repository initialized already");
+	repo->initialized = true;
+
 	repo->remote_state = remote_state_new();
 	repo->parsed_objects = parsed_object_pool_new(repo);
 	ALLOC_ARRAY(repo->index, 1);
 	index_state_init(repo->index, repo);
 	repo->check_deprecated_config = true;
+	repo_config_values_init(&repo->config_values_private_);
 
 	/*
 	 * When a command runs inside a repository, it learns what
@@ -178,24 +195,32 @@ void repo_set_gitdir(struct repository *repo,
 			repo->gitdir, "index");
 }
 
-void repo_set_hash_algo(struct repository *repo, int hash_algo)
+void repo_set_hash_algo(struct repository *repo, uint32_t hash_algo)
 {
 	repo->hash_algo = &hash_algos[hash_algo];
 }
 
-void repo_set_compat_hash_algo(struct repository *repo, int algo)
+void repo_set_compat_hash_algo(struct repository *repo MAYBE_UNUSED, uint32_t algo)
 {
+#ifdef WITH_RUST
 	if (hash_algo_by_ptr(repo->hash_algo) == algo)
 		BUG("hash_algo and compat_hash_algo match");
 	repo->compat_hash_algo = algo ? &hash_algos[algo] : NULL;
 	if (repo->compat_hash_algo)
 		repo_read_loose_object_map(repo);
+#else
+	if (algo)
+		die(_("compatibility hash algorithm support requires Rust"));
+#endif
 }
 
 void repo_set_ref_storage_format(struct repository *repo,
-				 enum ref_storage_format format)
+				 enum ref_storage_format format,
+				 const char *payload)
 {
 	repo->ref_storage_format = format;
+	free(repo->ref_storage_payload);
+	repo->ref_storage_payload = xstrdup_or_null(payload);
 }
 
 /*
@@ -277,10 +302,12 @@ int repo_init(struct repository *repo,
 
 	repo_set_hash_algo(repo, format.hash_algo);
 	repo_set_compat_hash_algo(repo, format.compat_hash_algo);
-	repo_set_ref_storage_format(repo, format.ref_storage_format);
+	repo_set_ref_storage_format(repo, format.ref_storage_format,
+				    format.ref_storage_payload);
 	repo->repository_format_worktree_config = format.worktree_config;
 	repo->repository_format_relative_worktrees = format.relative_worktrees;
 	repo->repository_format_precious_objects = format.precious_objects;
+	repo->repository_format_submodule_path_cfg = format.submodule_path_cfg;
 
 	/* take ownership of format.partial_clone */
 	repo->repository_format_partial_clone = format.partial_clone;
@@ -369,6 +396,7 @@ void repo_clear(struct repository *repo)
 	FREE_AND_NULL(repo->index_file);
 	FREE_AND_NULL(repo->worktree);
 	FREE_AND_NULL(repo->submodule_prefix);
+	FREE_AND_NULL(repo->ref_storage_payload);
 
 	odb_free(repo->objects);
 	repo->objects = NULL;
@@ -391,6 +419,11 @@ void repo_clear(struct repository *repo)
 	if (repo->index) {
 		discard_index(repo->index);
 		FREE_AND_NULL(repo->index);
+	}
+
+	if (repo->hook_config_cache) {
+		hook_cache_clear(repo->hook_config_cache);
+		FREE_AND_NULL(repo->hook_config_cache);
 	}
 
 	if (repo->promisor_remote_config) {

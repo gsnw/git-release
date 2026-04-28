@@ -35,6 +35,7 @@
 #include "sigchain.h"
 #include "mergesort.h"
 #include "prio-queue.h"
+#include "promisor-remote.h"
 
 static int transfer_unpack_limit = -1;
 static int fetch_unpack_limit = -1;
@@ -50,7 +51,6 @@ static int server_supports_filtering;
 static int advertise_sid;
 static struct shallow_lock shallow_lock;
 static const char *alternate_shallow_file;
-static struct fsck_options fsck_options = FSCK_OPTIONS_MISSING_GITMODULES;
 static struct strbuf fsck_msg_types = STRBUF_INIT;
 static struct string_list uri_protocols = STRING_LIST_INIT_DUP;
 
@@ -144,7 +144,7 @@ static struct commit *deref_without_lazy_fetch(const struct object_id *oid,
 	if (commit) {
 		if (mark_tags_complete_and_check_obj_db) {
 			if (!odb_has_object(the_repository->objects, oid,
-					    HAS_OBJECT_RECHECK_PACKED))
+					    ODB_HAS_OBJECT_RECHECK_PACKED))
 				die_in_commit_graph_only(oid);
 		}
 		return commit;
@@ -292,11 +292,14 @@ static int next_flush(int stateless_rpc, int count)
 static void mark_tips(struct fetch_negotiator *negotiator,
 		      const struct oid_array *negotiation_tips)
 {
+	struct refs_for_each_ref_options opts = {
+		.flags = REFS_FOR_EACH_INCLUDE_BROKEN,
+	};
 	int i;
 
 	if (!negotiation_tips) {
-		refs_for_each_rawref(get_main_ref_store(the_repository),
-				     rev_list_insert_ref_oid, negotiator);
+		refs_for_each_ref_ext(get_main_ref_store(the_repository),
+				      rev_list_insert_ref_oid, negotiator, &opts);
 		return;
 	}
 
@@ -792,8 +795,12 @@ static void mark_complete_and_common_ref(struct fetch_negotiator *negotiator,
 	 */
 	trace2_region_enter("fetch-pack", "mark_complete_local_refs", NULL);
 	if (!args->deepen) {
-		refs_for_each_rawref(get_main_ref_store(the_repository),
-				     mark_complete_oid, NULL);
+		struct refs_for_each_ref_options opts = {
+			.flags = REFS_FOR_EACH_INCLUDE_BROKEN,
+		};
+
+		refs_for_each_ref_ext(get_main_ref_store(the_repository),
+				      mark_complete_oid, NULL, &opts);
 		for_each_cached_alternate(NULL, mark_alternate_complete);
 		if (cutoff)
 			mark_recent_complete_commits(args, cutoff);
@@ -1016,12 +1023,8 @@ static int get_pack(struct fetch_pack_args *args,
 				     fsck_msg_types.buf);
 	}
 
-	if (index_pack_args) {
-		int i;
-
-		for (i = 0; i < cmd.args.nr; i++)
-			strvec_push(index_pack_args, cmd.args.v[i]);
-	}
+	if (index_pack_args)
+		strvec_pushv(index_pack_args, cmd.args.v);
 
 	sigchain_push(SIGPIPE, SIG_IGN);
 
@@ -1092,6 +1095,7 @@ static struct ref *do_fetch_pack(struct fetch_pack_args *args,
 				 struct shallow_info *si,
 				 struct string_list *pack_lockfiles)
 {
+	struct fsck_options fsck_options = { 0 };
 	struct repository *r = the_repository;
 	struct ref *ref = copy_ref_list(orig_ref);
 	struct object_id oid;
@@ -1220,6 +1224,8 @@ static struct ref *do_fetch_pack(struct fetch_pack_args *args,
 		alternate_shallow_file = setup_temporary_shallow(si->shallow);
 	} else
 		alternate_shallow_file = NULL;
+
+	fsck_options_init(&fsck_options, the_repository, FSCK_OPTIONS_MISSING_GITMODULES);
 	if (get_pack(args, fd, pack_lockfiles, NULL, sought, nr_sought,
 		     &fsck_options.gitmodules_found))
 		die(_("git fetch-pack: fetch failed."));
@@ -1227,6 +1233,7 @@ static struct ref *do_fetch_pack(struct fetch_pack_args *args,
 		die("fsck failed");
 
  all_done:
+	fsck_options_clear(&fsck_options);
 	if (negotiator)
 		negotiator->release(negotiator);
 	return ref;
@@ -1646,6 +1653,7 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 				    struct string_list *pack_lockfiles)
 {
 	struct repository *r = the_repository;
+	struct fsck_options fsck_options;
 	struct ref *ref = copy_ref_list(orig_ref);
 	enum fetch_state state = FETCH_CHECK_LOCAL;
 	struct oidset common = OIDSET_INIT;
@@ -1661,6 +1669,31 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 	struct string_list packfile_uris = STRING_LIST_INIT_DUP;
 	int i;
 	struct strvec index_pack_args = STRVEC_INIT;
+	const char *promisor_remote_config;
+
+	fsck_options_init(&fsck_options, the_repository, FSCK_OPTIONS_MISSING_GITMODULES);
+
+	if (server_feature_v2("promisor-remote", &promisor_remote_config))
+		promisor_remote_reply(promisor_remote_config, NULL);
+
+	if (args->filter_options.choice == LOFC_AUTO) {
+		struct strbuf errbuf = STRBUF_INIT;
+		char *constructed_filter = promisor_remote_construct_filter(r);
+
+		list_objects_filter_release(&args->filter_options);
+		/* Disallow 'auto' as a result of the resolution of this 'auto' filter below */
+		args->filter_options.allow_auto_filter = 0;
+
+		if (constructed_filter &&
+		    gently_parse_list_objects_filter(&args->filter_options,
+						     constructed_filter,
+						     &errbuf))
+			die(_("couldn't resolve 'auto' filter '%s': %s"),
+			    constructed_filter, errbuf.buf);
+
+		free(constructed_filter);
+		strbuf_release(&errbuf);
+	}
 
 	negotiator = &negotiator_alloc;
 	if (args->refetch)
@@ -1851,6 +1884,7 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 	if (negotiator)
 		negotiator->release(negotiator);
 
+	fsck_options_clear(&fsck_options);
 	oidset_clear(&common);
 	return ref;
 }
@@ -1982,7 +2016,7 @@ static void update_shallow(struct fetch_pack_args *args,
 		struct object_id *oid = si->shallow->oid;
 		for (i = 0; i < si->shallow->nr; i++)
 			if (odb_has_object(the_repository->objects, &oid[i],
-					   HAS_OBJECT_RECHECK_PACKED | HAS_OBJECT_FETCH_PROMISOR))
+					   ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR))
 				oid_array_append(&extra, &oid[i]);
 		if (extra.nr) {
 			setup_alternate_shallow(&shallow_lock,

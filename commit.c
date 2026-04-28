@@ -31,7 +31,6 @@
 #include "parse.h"
 #include "object-file.h"
 #include "object-file-convert.h"
-#include "prio-queue.h"
 
 static struct commit_extra_header *read_commit_extra_header_lines(const char *buf, size_t len, const char **);
 
@@ -43,13 +42,35 @@ const char *commit_type = "commit";
 struct commit *lookup_commit_reference_gently(struct repository *r,
 		const struct object_id *oid, int quiet)
 {
-	struct object *obj = deref_tag(r,
-				       parse_object(r, oid),
-				       NULL, 0);
+	const struct object_id *maybe_peeled;
+	struct object_id peeled_oid;
+	struct commit *commit;
+	enum object_type type;
 
-	if (!obj)
+	switch (peel_object_ext(r, oid, &peeled_oid, 0, &type)) {
+	case PEEL_NON_TAG:
+		maybe_peeled = oid;
+		break;
+	case PEEL_PEELED:
+		maybe_peeled = &peeled_oid;
+		break;
+	default:
 		return NULL;
-	return object_as_type(obj, OBJ_COMMIT, quiet);
+	}
+
+	if (type != OBJ_COMMIT) {
+		if (!quiet)
+			error(_("object %s is a %s, not a %s"),
+			      oid_to_hex(oid), type_name(type),
+			      type_name(OBJ_COMMIT));
+		return NULL;
+	}
+
+	commit = lookup_commit(r, maybe_peeled);
+	if (!commit || repo_parse_commit_gently(r, commit, quiet) < 0)
+		return NULL;
+
+	return commit;
 }
 
 struct commit *lookup_commit_reference(struct repository *r, const struct object_id *oid)
@@ -191,7 +212,7 @@ void unparse_commit(struct repository *r, const struct object_id *oid)
 
 	if (!c->object.parsed)
 		return;
-	free_commit_list(c->parents);
+	commit_list_free(c->parents);
 	c->parents = NULL;
 	c->object.parsed = 0;
 }
@@ -436,7 +457,7 @@ void release_commit_memory(struct parsed_object_pool *pool, struct commit *c)
 	set_commit_tree(c, NULL);
 	free_commit_buffer(pool, c);
 	c->index = 0;
-	free_commit_list(c->parents);
+	commit_list_free(c->parents);
 
 	c->object.parsed = 0;
 }
@@ -480,7 +501,7 @@ int parse_commit_buffer(struct repository *r, struct commit *item, const void *b
 	 * same error, but that's good, since it lets our caller know
 	 * the result cannot be trusted.
 	 */
-	free_commit_list(item->parents);
+	commit_list_free(item->parents);
 	item->parents = NULL;
 
 	tail += size;
@@ -680,7 +701,7 @@ unsigned commit_list_count(const struct commit_list *l)
 	return c;
 }
 
-struct commit_list *copy_commit_list(const struct commit_list *list)
+struct commit_list *commit_list_copy(const struct commit_list *list)
 {
 	struct commit_list *head = NULL;
 	struct commit_list **pp = &head;
@@ -691,7 +712,7 @@ struct commit_list *copy_commit_list(const struct commit_list *list)
 	return head;
 }
 
-struct commit_list *reverse_commit_list(struct commit_list *list)
+struct commit_list *commit_list_reverse(struct commit_list *list)
 {
 	struct commit_list *next = NULL, *current, *backup;
 	for (current = list; current; current = backup) {
@@ -702,7 +723,7 @@ struct commit_list *reverse_commit_list(struct commit_list *list)
 	return next;
 }
 
-void free_commit_list(struct commit_list *list)
+void commit_list_free(struct commit_list *list)
 {
 	while (list)
 		pop_commit(&list);
@@ -977,7 +998,7 @@ void sort_in_topological_order(struct commit_list **list, enum rev_sort_order so
 		prio_queue_reverse(&queue);
 
 	/* We no longer need the commit list */
-	free_commit_list(orig);
+	commit_list_free(orig);
 
 	pptr = list;
 	*list = NULL;
@@ -1015,9 +1036,7 @@ void sort_in_topological_order(struct commit_list **list, enum rev_sort_order so
 }
 
 struct rev_collect {
-	struct commit **commit;
-	int nr;
-	int alloc;
+	struct commit_stack stack;
 	unsigned int initial : 1;
 };
 
@@ -1034,8 +1053,7 @@ static void add_one_commit(struct object_id *oid, struct rev_collect *revs)
 	    repo_parse_commit(the_repository, commit))
 		return;
 
-	ALLOC_GROW(revs->commit, revs->nr + 1, revs->alloc);
-	revs->commit[revs->nr++] = commit;
+	commit_stack_push(&revs->stack, commit);
 	commit->object.flags |= TMP_MARK;
 }
 
@@ -1060,7 +1078,7 @@ struct commit *get_fork_point(const char *refname, struct commit *commit)
 	struct object_id oid;
 	struct rev_collect revs;
 	struct commit_list *bases = NULL;
-	int i;
+	size_t i;
 	struct commit *ret = NULL;
 	char *full_refname;
 
@@ -1074,19 +1092,19 @@ struct commit *get_fork_point(const char *refname, struct commit *commit)
 		die("Ambiguous refname: '%s'", refname);
 	}
 
-	memset(&revs, 0, sizeof(revs));
+	commit_stack_init(&revs.stack);
 	revs.initial = 1;
 	refs_for_each_reflog_ent(get_main_ref_store(the_repository),
 				 full_refname, collect_one_reflog_ent, &revs);
 
-	if (!revs.nr)
+	if (!revs.stack.nr)
 		add_one_commit(&oid, &revs);
 
-	for (i = 0; i < revs.nr; i++)
-		revs.commit[i]->object.flags &= ~TMP_MARK;
+	for (i = 0; i < revs.stack.nr; i++)
+		revs.stack.items[i]->object.flags &= ~TMP_MARK;
 
-	if (repo_get_merge_bases_many(the_repository, commit, revs.nr,
-				      revs.commit, &bases) < 0)
+	if (repo_get_merge_bases_many(the_repository, commit, revs.stack.nr,
+				      revs.stack.items, &bases) < 0)
 		exit(128);
 
 	/*
@@ -1097,17 +1115,17 @@ struct commit *get_fork_point(const char *refname, struct commit *commit)
 		goto cleanup_return;
 
 	/* And the found one must be one of the reflog entries */
-	for (i = 0; i < revs.nr; i++)
-		if (&bases->item->object == &revs.commit[i]->object)
+	for (i = 0; i < revs.stack.nr; i++)
+		if (&bases->item->object == &revs.stack.items[i]->object)
 			break; /* found */
-	if (revs.nr <= i)
+	if (revs.stack.nr <= i)
 		goto cleanup_return;
 
 	ret = bases->item;
 
 cleanup_return:
-	free(revs.commit);
-	free_commit_list(bases);
+	commit_stack_clear(&revs.stack);
+	commit_list_free(bases);
 	free(full_refname);
 	return ret;
 }
@@ -1150,18 +1168,6 @@ int add_header_signature(struct strbuf *buf, struct strbuf *sig, const struct gi
 		copypos += len;
 	}
 	return 0;
-}
-
-static int sign_commit_to_strbuf(struct strbuf *sig, struct strbuf *buf, const char *keyid)
-{
-	char *keyid_to_free = NULL;
-	int ret = 0;
-	if (!keyid || !*keyid)
-		keyid = keyid_to_free = get_signing_key();
-	if (sign_buffer(buf, sig, keyid))
-		ret = -1;
-	free(keyid_to_free);
-	return ret;
 }
 
 int parse_signed_commit(const struct commit *commit,
@@ -1741,7 +1747,8 @@ int commit_tree_extended(const char *msg, size_t msg_len,
 		oidcpy(&parent_buf[i++], &p->item->object.oid);
 
 	write_commit_tree(&buffer, msg, msg_len, tree, parent_buf, nparents, author, committer, extra);
-	if (sign_commit && sign_commit_to_strbuf(&sig, &buffer, sign_commit)) {
+	if (sign_commit && sign_buffer(&buffer, &sig, sign_commit,
+				       SIGN_BUFFER_USE_DEFAULT_KEY)) {
 		result = -1;
 		goto out;
 	}
@@ -1773,7 +1780,9 @@ int commit_tree_extended(const char *msg, size_t msg_len,
 		free_commit_extra_headers(compat_extra);
 		free(mapped_parents);
 
-		if (sign_commit && sign_commit_to_strbuf(&compat_sig, &compat_buffer, sign_commit)) {
+		if (sign_commit && sign_buffer(&compat_buffer, &compat_sig,
+					       sign_commit,
+					       SIGN_BUFFER_USE_DEFAULT_KEY)) {
 			result = -1;
 			goto out;
 		}

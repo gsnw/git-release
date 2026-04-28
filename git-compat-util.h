@@ -34,10 +34,6 @@ struct strbuf;
 #  define DISABLE_WARNING(warning)
 #endif
 
-#ifdef DISABLE_SIGN_COMPARE_WARNINGS
-DISABLE_WARNING(-Wsign-compare)
-#endif
-
 #undef FLEX_ARRAY
 #define FLEX_ARRAY /* empty - weather balloon to require C99 FAM */
 
@@ -339,11 +335,7 @@ static inline int is_path_owned_by_current_uid(const char *path,
 #endif
 
 #ifndef find_last_dir_sep
-static inline char *git_find_last_dir_sep(const char *path)
-{
-	return strrchr(path, '/');
-}
-#define find_last_dir_sep git_find_last_dir_sep
+#define find_last_dir_sep(path) strrchr((path), '/')
 #endif
 
 #ifndef has_dir_sep
@@ -472,6 +464,21 @@ report_fn get_warn_routine(void);
 void set_die_is_recursing_routine(int (*routine)(void));
 
 /*
+ * Check that an out-parameter is "at least as const as" a matching
+ * in-parameter. For example, skip_prefix() will return "out" that is a subset
+ * of "str". So:
+ *
+ *  const str, const out: ok
+ *  non-const str, const out: ok
+ *  non-const str, non-const out: ok
+ *  const str, non-const out: compile error
+ *
+ *  See the skip_prefix macro below for an example of use.
+ */
+#define CONST_OUTPARAM(in, out) \
+	((const char **)(0 ? ((*(out) = (in)),(out)) : (out)))
+
+/*
  * If the string "str" begins with the string found in "prefix", return true.
  * The "out" parameter is set to "str + strlen(prefix)" (i.e., to the point in
  * the string right after the prefix).
@@ -487,8 +494,10 @@ void set_die_is_recursing_routine(int (*routine)(void));
  *   [skip prefix if present, otherwise use whole string]
  *   skip_prefix(name, "refs/heads/", &name);
  */
-static inline bool skip_prefix(const char *str, const char *prefix,
-			       const char **out)
+#define skip_prefix(str, prefix, out) \
+	skip_prefix_impl((str), (prefix), CONST_OUTPARAM((str), (out)))
+static inline bool skip_prefix_impl(const char *str, const char *prefix,
+				    const char **out)
 {
 	do {
 		if (!*prefix) {
@@ -893,8 +902,10 @@ static inline size_t xsize_t(off_t len)
  * is done via tolower(), so it is strictly ASCII (no multi-byte characters or
  * locale-specific conversions).
  */
-static inline bool skip_iprefix(const char *str, const char *prefix,
-			       const char **out)
+#define skip_iprefix(str, prefix, out) \
+	skip_iprefix_impl((str), (prefix), CONST_OUTPARAM((str), (out)))
+static inline bool skip_iprefix_impl(const char *str, const char *prefix,
+				     const char **out)
 {
 	do {
 		if (!*prefix) {
@@ -1098,4 +1109,8 @@ extern int not_supposed_to_survive;
 #define assert(expr) ((void)(not_supposed_to_survive || (expr)))
 #endif /* CHECK_ASSERTION_SIDE_EFFECTS */
 
+#endif
+
+#ifdef DISABLE_SIGN_COMPARE_WARNINGS
+DISABLE_WARNING(-Wsign-compare)
 #endif

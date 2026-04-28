@@ -558,7 +558,7 @@ static void process_object(struct object *obj, const char *path, void *data)
 			describe_commit(pcd->current_commit, pcd->dst);
 			strbuf_addf(pcd->dst, ":%s", path);
 		}
-		free_commit_list(pcd->revs->commits);
+		commit_list_free(pcd->revs->commits);
 		pcd->revs->commits = NULL;
 	}
 }
@@ -641,6 +641,9 @@ int cmd_describe(int argc,
 		 const char *prefix,
 		 struct repository *repo UNUSED )
 {
+	struct refs_for_each_ref_options for_each_ref_opts = {
+		.flags = REFS_FOR_EACH_INCLUDE_BROKEN,
+	};
 	int contains = 0;
 	struct option options[] = {
 		OPT_BOOL(0, "contains",   &contains, N_("find the tag that comes after the commit")),
@@ -738,8 +741,8 @@ int cmd_describe(int argc,
 	}
 
 	hashmap_init(&names, commit_name_neq, NULL, 0);
-	refs_for_each_rawref(get_main_ref_store(the_repository), get_name,
-			     NULL);
+	refs_for_each_ref_ext(get_main_ref_store(the_repository),
+			      get_name, NULL, &for_each_ref_opts);
 	if (!hashmap_get_size(&names) && !always)
 		die(_("No names found, cannot describe anything."));
 

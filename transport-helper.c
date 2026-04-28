@@ -154,6 +154,8 @@ static struct child_process *get_helper(struct transport *transport)
 
 	helper->trace2_child_class = helper->args.v[0]; /* "remote-<name>" */
 
+	helper->clean_on_exit = 1;
+	helper->wait_after_clean = 1;
 	code = start_command(helper);
 	if (code < 0 && errno == ENOENT)
 		die(_("unable to find remote helper for '%s'"), data->name);
@@ -781,7 +783,8 @@ static int push_update_ref_status(struct strbuf *buf,
 
 	if (starts_with(buf->buf, "option ")) {
 		struct object_id old_oid, new_oid;
-		const char *key, *val;
+		char *key;
+		const char *val;
 		char *p;
 
 		if (!state->hint || !(state->report || state->new_report))

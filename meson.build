@@ -239,7 +239,9 @@ git = find_program('git', dirs: program_path, native: true, required: false)
 sed = find_program('sed', dirs: program_path, native: true)
 shell = find_program('sh', dirs: program_path, native: true)
 tar = find_program('tar', dirs: program_path, native: true)
+tclsh = find_program('tclsh', required: get_option('git_gui'), native: false)
 time = find_program('time', dirs: program_path, required: get_option('benchmarks'))
+wish = find_program('wish', required: get_option('git_gui').enabled() or get_option('gitk').enabled(), native: false)
 
 # Detect the target shell that is used by Git at runtime. Note that we prefer
 # "/bin/sh" over a PATH-based lookup, which provides a working shell on most
@@ -268,6 +270,13 @@ version_gen_environment.set('GIT_USER_AGENT', get_option('user_agent'))
 version_gen_environment.set('GIT_VERSION', get_option('version'))
 
 compiler = meson.get_compiler('c')
+
+compat_sources = [
+  'compat/nonblock.c',
+  'compat/obstack.c',
+  'compat/open.c',
+  'compat/terminal.c',
+]
 
 libgit_sources = [
   'abspath.c',
@@ -302,10 +311,6 @@ libgit_sources = [
   'commit.c',
   'common-exit.c',
   'common-init.c',
-  'compat/nonblock.c',
-  'compat/obstack.c',
-  'compat/open.c',
-  'compat/terminal.c',
   'compiler-tricks/not-constant.c',
   'config.c',
   'connect.c',
@@ -397,6 +402,8 @@ libgit_sources = [
   'object-name.c',
   'object.c',
   'odb.c',
+  'odb/source.c',
+  'odb/source-files.c',
   'odb/streaming.c',
   'oid-array.c',
   'oidmap.c',
@@ -471,6 +478,7 @@ libgit_sources = [
   'repack-midx.c',
   'repack-promisor.c',
   'replace-object.c',
+  'replay.c',
   'repo-settings.c',
   'repository.c',
   'rerere.c',
@@ -551,7 +559,7 @@ libgit_sources = [
 libgit_sources += custom_target(
   input: 'command-list.txt',
   output: 'command-list.h',
-  command: [shell, meson.current_source_dir() + '/generate-cmdlist.sh', meson.current_source_dir(), '@OUTPUT@'],
+  command: [shell, meson.current_source_dir() + '/tools/generate-cmdlist.sh', meson.current_source_dir(), '@OUTPUT@'],
   env: script_environment,
 )
 
@@ -609,6 +617,7 @@ builtin_sources = [
   'builtin/grep.c',
   'builtin/hash-object.c',
   'builtin/help.c',
+  'builtin/history.c',
   'builtin/hook.c',
   'builtin/index-pack.c',
   'builtin/init-db.c',
@@ -718,11 +727,14 @@ endif
 
 builtin_sources += custom_target(
   output: 'config-list.h',
+  depfile: 'config-list.h.d',
+  depend_files: [ 'tools/generate-configlist.sh' ],
   command: [
     shell,
-    meson.current_source_dir() + '/generate-configlist.sh',
+    meson.current_source_dir() / 'tools/generate-configlist.sh',
     meson.current_source_dir(),
     '@OUTPUT@',
+    '@DEPFILE@',
   ],
   env: script_environment,
 )
@@ -732,7 +744,7 @@ builtin_sources += custom_target(
   output: 'hook-list.h',
   command: [
     shell,
-    meson.current_source_dir() + '/generate-hooklist.sh',
+    meson.current_source_dir() + '/tools/generate-hooklist.sh',
     meson.current_source_dir(),
     '@OUTPUT@',
   ],
@@ -1033,42 +1045,52 @@ if iconv.found()
     have_old_iconv = true
   endif
 
-  iconv_omits_bom_source = '''#
-    #include <iconv.h>
+  if meson.can_run_host_binaries()
+    if compiler.run('''
+      #include <iconv.h>
 
-    int main(int argc, const char **argv)
-    {
-  '''
-  if have_old_iconv
-    iconv_omits_bom_source += '''
-      typedef const char *iconv_ibp;
-    '''
-  else
-    iconv_omits_bom_source += '''
-      typedef char *iconv_ibp;
-    '''
-  endif
-  iconv_omits_bom_source += '''
-      int v;
-      iconv_t conv;
-      char in[] = "a"; iconv_ibp pin = in;
-      char out[20] = ""; char *pout = out;
-      size_t isz = sizeof in;
-      size_t osz = sizeof out;
+      int main(int argc, const char **argv)
+      {
+        char in[] = "a", *inpos = in;
+        char out[20] = "", *outpos = out;
+        size_t insz = sizeof(in), outsz = sizeof(out);
+        iconv_t conv = iconv_open("UTF-16", "UTF-8");
+        iconv(conv, (void *) &inpos, &insz, &outpos, &outsz);
+        iconv_close(conv);
+        return (unsigned char)(out[0]) + (unsigned char)(out[1]) != 0xfe + 0xff;
+      }
+    ''',
+      dependencies: iconv,
+      name: 'iconv omits BOM',
+    ).returncode() != 0
+      libgit_c_args += '-DICONV_OMITS_BOM'
+    endif
 
-      conv = iconv_open("UTF-16", "UTF-8");
-      iconv(conv, &pin, &isz, &pout, &osz);
-      iconv_close(conv);
-      v = (unsigned char)(out[0]) + (unsigned char)(out[1]);
-      return v != 0xfe + 0xff;
-    }
-  '''
+    if compiler.run('''
+      #include <iconv.h>
+      #include <string.h>
 
-  if meson.can_run_host_binaries() and compiler.run(iconv_omits_bom_source,
-    dependencies: iconv,
-    name: 'iconv omits BOM',
-  ).returncode() != 0
-    libgit_c_args += '-DICONV_OMITS_BOM'
+      int main(int argc, const char *argv[])
+      {
+          char in[] = "\x1b\x24\x42\x24\x22\x24\x22\x1b\x28\x42", *inpos = in;
+          char out[7] = { 0 }, *outpos = out;
+          size_t insz = sizeof(in) - 1, outsz = 4;
+          iconv_t conv = iconv_open("UTF-8", "ISO-2022-JP");
+          if (!conv)
+              return 1;
+          if (iconv(conv, (void *) &inpos, &insz, &outpos, &outsz) != (size_t) -1)
+              return 2;
+          outsz = sizeof(out) - (outpos - out);
+          if (iconv(conv, (void *) &inpos, &insz, &outpos, &outsz) == (size_t) -1)
+              return 3;
+          return strcmp("\343\201\202\343\201\202", out) ? 4 : 0;
+      }
+    ''',
+      dependencies: iconv,
+      name: 'iconv handles restarts properly',
+    ).returncode() != 0
+      libgit_c_args += '-DICONV_RESTART_RESET'
+    endif
   endif
 else
   libgit_c_args += '-DNO_ICONV'
@@ -1156,7 +1178,7 @@ endif
 
 if not has_poll_h and not has_sys_poll_h
   libgit_c_args += '-DNO_POLL'
-  libgit_sources += 'compat/poll/poll.c'
+  compat_sources += 'compat/poll/poll.c'
   libgit_include_directories += 'compat/poll'
 endif
 
@@ -1172,7 +1194,7 @@ endif
 # implementation to threat things like drive prefixes specially.
 if host_machine.system() == 'windows' or not compiler.has_header('libgen.h')
   libgit_c_args += '-DNO_LIBGEN_H'
-  libgit_sources += 'compat/basename.c'
+  compat_sources += 'compat/basename.c'
 endif
 
 if compiler.has_header('paths.h')
@@ -1202,7 +1224,7 @@ if host_machine.system() != 'windows'
   foreach symbol : ['inet_ntop', 'inet_pton', 'hstrerror']
     if not compiler.has_function(symbol, dependencies: networking_dependencies)
       libgit_c_args += '-DNO_' + symbol.to_upper()
-      libgit_sources += 'compat/' + symbol + '.c'
+      compat_sources += 'compat/' + symbol + '.c'
     endif
   endforeach
 endif
@@ -1244,18 +1266,18 @@ else
 endif
 
 if host_machine.system() == 'darwin'
-  libgit_sources += 'compat/precompose_utf8.c'
+  compat_sources += 'compat/precompose_utf8.c'
   libgit_c_args += '-DPRECOMPOSE_UNICODE'
   libgit_c_args += '-DPROTECT_HFS_DEFAULT'
 endif
 
 # Configure general compatibility wrappers.
 if host_machine.system() == 'cygwin'
-  libgit_sources += [
+  compat_sources += [
     'compat/win32/path-utils.c',
   ]
 elif host_machine.system() == 'windows'
-  libgit_sources += [
+  compat_sources += [
     'compat/winansi.c',
     'compat/win32/dirent.c',
     'compat/win32/flush.c',
@@ -1282,18 +1304,20 @@ elif host_machine.system() == 'windows'
   libgit_include_directories += 'compat/win32'
   if compiler.get_id() == 'msvc'
     libgit_include_directories += 'compat/vcbuild/include'
-    libgit_sources += 'compat/msvc.c'
+    compat_sources += 'compat/msvc.c'
   else
-    libgit_sources += 'compat/mingw.c'
+    compat_sources += 'compat/mingw.c'
   endif
 endif
 
 if host_machine.system() == 'linux'
-  libgit_sources += 'compat/linux/procinfo.c'
+  compat_sources += 'compat/linux/procinfo.c'
 elif host_machine.system() == 'windows'
-  libgit_sources += 'compat/win32/trace2_win32_process_info.c'
+  compat_sources += 'compat/win32/trace2_win32_process_info.c'
+elif host_machine.system() == 'darwin'
+  compat_sources += 'compat/darwin/procinfo.c'
 else
-  libgit_sources += 'compat/stub/procinfo.c'
+  compat_sources += 'compat/stub/procinfo.c'
 endif
 
 if host_machine.system() == 'cygwin' or host_machine.system() == 'windows'
@@ -1306,13 +1330,13 @@ endif
 
 # Configure the simple-ipc subsystem required fro the fsmonitor.
 if host_machine.system() == 'windows'
-  libgit_sources += [
+  compat_sources += [
     'compat/simple-ipc/ipc-shared.c',
     'compat/simple-ipc/ipc-win32.c',
   ]
   libgit_c_args += '-DSUPPORTS_SIMPLE_IPC'
 else
-  libgit_sources += [
+  compat_sources += [
     'compat/simple-ipc/ipc-shared.c',
     'compat/simple-ipc/ipc-unix-socket.c',
   ]
@@ -1330,7 +1354,7 @@ if fsmonitor_backend != ''
   libgit_c_args += '-DHAVE_FSMONITOR_DAEMON_BACKEND'
   libgit_c_args += '-DHAVE_FSMONITOR_OS_SETTINGS'
 
-  libgit_sources += [
+  compat_sources += [
     'compat/fsmonitor/fsm-health-' + fsmonitor_backend + '.c',
     'compat/fsmonitor/fsm-ipc-' + fsmonitor_backend + '.c',
     'compat/fsmonitor/fsm-listen-' + fsmonitor_backend + '.c',
@@ -1346,7 +1370,7 @@ if not get_option('b_sanitize').contains('address') and get_option('regex').allo
 
   if compiler.get_define('REG_ENHANCED', prefix: '#include <regex.h>') != ''
     libgit_c_args += '-DUSE_ENHANCED_BASIC_REGULAR_EXPRESSIONS'
-    libgit_sources += 'compat/regcomp_enhanced.c'
+    compat_sources += 'compat/regcomp_enhanced.c'
   endif
 elif not get_option('regex').enabled()
   libgit_c_args += [
@@ -1355,7 +1379,7 @@ elif not get_option('regex').enabled()
     '-DNO_MBSUPPORT',
   ]
   build_options_config.set('NO_REGEX', '1')
-  libgit_sources += 'compat/regex/regex.c'
+  compat_sources += 'compat/regex/regex.c'
   libgit_include_directories += 'compat/regex'
 else
     error('Native regex support requested but not found')
@@ -1417,9 +1441,9 @@ else
     'getpagesize' : [],
   }
 
-  if get_option('b_sanitize').contains('address')
+  if get_option('b_sanitize').contains('address') or get_option('b_sanitize').contains('leak')
     libgit_c_args += '-DNO_MMAP'
-    libgit_sources += 'compat/mmap.c'
+    compat_sources += 'compat/mmap.c'
   else
     checkfuncs += { 'mmap': ['mmap.c'] }
   endif
@@ -1429,7 +1453,7 @@ foreach func, impls : checkfuncs
   if not compiler.has_function(func)
     libgit_c_args += '-DNO_' + func.to_upper()
     foreach impl : impls
-      libgit_sources += 'compat/' + impl
+      compat_sources += 'compat/' + impl
     endforeach
   endif
 endforeach
@@ -1440,13 +1464,13 @@ endif
 
 if not compiler.has_function('strdup')
   libgit_c_args += '-DOVERRIDE_STRDUP'
-  libgit_sources += 'compat/strdup.c'
+  compat_sources += 'compat/strdup.c'
 endif
 
 if not compiler.has_function('qsort')
   libgit_c_args += '-DINTERNAL_QSORT'
 endif
-libgit_sources += 'compat/qsort_s.c'
+compat_sources += 'compat/qsort_s.c'
 
 if compiler.has_function('getdelim')
   libgit_c_args += '-DHAVE_GETDELIM'
@@ -1502,7 +1526,7 @@ if meson.can_run_host_binaries() and compiler.run('''
   }
 ''', name: 'fread reads directories').returncode() == 0
   libgit_c_args += '-DFREAD_READS_DIRECTORIES'
-  libgit_sources += 'compat/fopen.c'
+  compat_sources += 'compat/fopen.c'
 endif
 
 if not meson.is_cross_build() and fs.exists('/dev/tty')
@@ -1736,14 +1760,23 @@ else
 endif
 
 libgit = declare_dependency(
-  link_with: static_library('git',
-    sources: libgit_sources,
-    c_args: libgit_c_args + [
-      '-DGIT_VERSION_H="' + version_def_h.full_path() + '"',
-    ],
-    dependencies: libgit_dependencies,
-    include_directories: libgit_include_directories,
-  ),
+  link_with: [
+    static_library('compat',
+      sources: compat_sources,
+      c_args: libgit_c_args,
+      dependencies: libgit_dependencies,
+      include_directories: libgit_include_directories,
+    ),
+    static_library('git',
+      sources: libgit_sources,
+      c_args: libgit_c_args + [
+        '-DGIT_VERSION_H="' + version_def_h.full_path() + '"',
+      ],
+      c_pch: 'tools/precompiled.h',
+      dependencies: libgit_dependencies,
+      include_directories: libgit_include_directories,
+    ),
+  ],
   compile_args: libgit_c_args,
   dependencies: libgit_dependencies,
   include_directories: libgit_include_directories,
@@ -1800,6 +1833,7 @@ test_dependencies = [ ]
 
 git_builtin = executable('git',
   sources: builtin_sources + 'git.c',
+  c_pch: 'tools/precompiled.h',
   dependencies: [libgit_commonmain],
   install: true,
   install_dir: git_exec_path,
@@ -1950,7 +1984,7 @@ foreach script : scripts_sh
     output: fs.stem(script),
     command: [
       shell,
-      meson.project_source_root() / 'generate-script.sh',
+      meson.project_source_root() / 'tools/generate-script.sh',
       '@INPUT@',
       '@OUTPUT@',
       meson.project_build_root() / 'GIT-BUILD-OPTIONS',
@@ -1999,7 +2033,7 @@ if perl_features_enabled
 
   generate_perl_command = [
     shell,
-    meson.project_source_root() / 'generate-perl.sh',
+    meson.project_source_root() / 'tools/generate-perl.sh',
     meson.project_build_root() / 'GIT-BUILD-OPTIONS',
     git_version_file.full_path(),
     perl_header,
@@ -2048,7 +2082,7 @@ if target_python.found()
       output: fs.stem(script),
       command: [
         shell,
-        meson.project_source_root() / 'generate-python.sh',
+        meson.project_source_root() / 'tools/generate-python.sh',
         meson.project_build_root() / 'GIT-BUILD-OPTIONS',
         '@INPUT@',
         '@OUTPUT@',
@@ -2140,6 +2174,7 @@ else
 endif
 
 subdir('contrib')
+subdir('tools')
 
 # Note that the target is intentionally configured after including the
 # 'contrib' directory, as some tool there also have their own manpages.
@@ -2250,6 +2285,16 @@ configure_file(
   configuration: build_options_config,
 )
 
+gitk_option = get_option('gitk').disable_auto_if(not wish.found())
+if gitk_option.allowed()
+  subproject('gitk')
+endif
+
+git_gui_option = get_option('git_gui').disable_auto_if(not tclsh.found() or not wish.found())
+if git_gui_option.allowed()
+  subproject('git-gui')
+endif
+
 # Development environments can be used via `meson devenv -C <builddir>`. This
 # allows you to execute test scripts directly with the built Git version and
 # puts the built version of Git in your PATH.
@@ -2276,6 +2321,8 @@ summary({
   'curl': curl,
   'expat': expat,
   'gettext': intl,
+  'gitk': gitk_option.allowed(),
+  'git-gui': git_gui_option.allowed(),
   'gitweb': gitweb_option.allowed(),
   'iconv': iconv,
   'pcre2': pcre2,
