@@ -8,6 +8,7 @@
 #include "thread-utils.h"
 
 struct cached_object_entry;
+struct odb_source_inmemory;
 struct packed_git;
 struct repository;
 struct strbuf;
@@ -30,24 +31,6 @@ extern int fetch_if_missing;
 char *compute_alternate_path(const char *path, struct strbuf *err);
 
 /*
- * A transaction may be started for an object database prior to writing new
- * objects via odb_transaction_begin(). These objects are not committed until
- * odb_transaction_commit() is invoked. Only a single transaction may be pending
- * at a time.
- *
- * Each ODB source is expected to implement its own transaction handling.
- */
-struct odb_transaction;
-typedef void (*odb_transaction_commit_fn)(struct odb_transaction *transaction);
-struct odb_transaction {
-	/* The ODB source the transaction is opened against. */
-	struct odb_source *source;
-
-	/* The ODB source specific callback invoked to commit a transaction. */
-	odb_transaction_commit_fn commit;
-};
-
-/*
  * The object database encapsulates access to objects in a repository. It
  * manages one or more sources that store the actual objects which are
  * configured via alternates.
@@ -57,7 +40,7 @@ struct object_database {
 	struct repository *repo;
 
 	/*
-	 * State of current current object database transaction. Only one
+	 * State of current object database transaction. Only one
 	 * transaction may be pending at a time. Is NULL when no transaction is
 	 * configured.
 	 */
@@ -98,8 +81,7 @@ struct object_database {
 	 * to write them into the object store (e.g. a browse-only
 	 * application).
 	 */
-	struct cached_object_entry *cached_objects;
-	size_t cached_object_nr, cached_object_alloc;
+	struct odb_source *inmemory_objects;
 
 	/*
 	 * A fast, rough count of the number of objects in the repository.
@@ -147,19 +129,6 @@ void odb_close(struct object_database *o);
  * objects may become accessible.
  */
 void odb_reprepare(struct object_database *o);
-
-/*
- * Starts an ODB transaction. Subsequent objects are written to the transaction
- * and not committed until odb_transaction_commit() is invoked on the
- * transaction. If the ODB already has a pending transaction, NULL is returned.
- */
-struct odb_transaction *odb_transaction_begin(struct object_database *odb);
-
-/*
- * Commits an ODB transaction making the written objects visible. If the
- * specified transaction is NULL, the function is a no-op.
- */
-void odb_transaction_commit(struct odb_transaction *transaction);
 
 /*
  * Find source by its object directory path. Returns a `NULL` pointer in case
@@ -259,12 +228,12 @@ struct odb_source *odb_add_to_alternates_memory(struct object_database *odb,
 void *odb_read_object(struct object_database *odb,
 		      const struct object_id *oid,
 		      enum object_type *type,
-		      unsigned long *size);
+		      size_t *size);
 
 void *odb_read_object_peeled(struct object_database *odb,
 			     const struct object_id *oid,
 			     enum object_type required_type,
-			     unsigned long *size,
+			     size_t *size,
 			     struct object_id *oid_ret);
 
 /*
@@ -276,13 +245,13 @@ void *odb_read_object_peeled(struct object_database *odb,
  * that reference it.
  */
 int odb_pretend_object(struct object_database *odb,
-		       void *buf, unsigned long len, enum object_type type,
+		       void *buf, size_t len, enum object_type type,
 		       struct object_id *oid);
 
 struct object_info {
 	/* Request */
 	enum object_type *typep;
-	unsigned long *sizep;
+	size_t *sizep;
 	off_t *disk_sizep;
 	struct object_id *delta_base_oid;
 	void **contentp;
@@ -387,7 +356,7 @@ int odb_read_object_info_extended(struct object_database *odb,
  */
 int odb_read_object_info(struct object_database *odb,
 			 const struct object_id *oid,
-			 unsigned long *sizep);
+			 size_t *sizep);
 
 enum odb_has_object_flags {
 	/* Retry packed storage after checking packed and loose storage */
@@ -593,11 +562,7 @@ static inline int odb_write_object(struct object_database *odb,
 	return odb_write_object_ext(odb, buf, len, type, oid, NULL, 0);
 }
 
-struct odb_write_stream {
-	const void *(*read)(struct odb_write_stream *, unsigned long *len);
-	void *data;
-	int is_finished;
-};
+struct odb_write_stream;
 
 int odb_write_object_stream(struct object_database *odb,
 			    struct odb_write_stream *stream, size_t len,
